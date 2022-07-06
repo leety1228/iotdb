@@ -24,8 +24,8 @@ import org.apache.iotdb.common.rpc.thrift.TEndPoint;
 import org.apache.iotdb.common.rpc.thrift.TSStatus;
 import org.apache.iotdb.confignode.client.AsyncDataNodeClientPool;
 import org.apache.iotdb.confignode.client.handlers.FunctionManagementHandler;
-import org.apache.iotdb.confignode.consensus.request.write.CreateFunctionReq;
-import org.apache.iotdb.confignode.consensus.request.write.DropFunctionReq;
+import org.apache.iotdb.confignode.consensus.request.write.CreateFunctionPlan;
+import org.apache.iotdb.confignode.consensus.request.write.DropFunctionPlan;
 import org.apache.iotdb.confignode.persistence.UDFInfo;
 import org.apache.iotdb.mpp.rpc.thrift.TCreateFunctionRequest;
 import org.apache.iotdb.mpp.rpc.thrift.TDropFunctionRequest;
@@ -59,7 +59,7 @@ public class UDFManager {
       final TSStatus configNodeStatus =
           configManager
               .getConsensusManager()
-              .write(new CreateFunctionReq(functionName, className, uris))
+              .write(new CreateFunctionPlan(functionName, className, uris))
               .getStatus();
       if (configNodeStatus.getCode() != TSStatusCode.SUCCESS_STATUS.getStatusCode()) {
         return configNodeStatus;
@@ -80,15 +80,15 @@ public class UDFManager {
 
   private List<TSStatus> createFunctionOnDataNodes(
       String functionName, String className, List<String> uris) {
-    final List<TDataNodeInfo> onlineDataNodes =
-        configManager.getNodeManager().getOnlineDataNodes(-1);
+    final List<TDataNodeInfo> registeredDataNodes =
+        configManager.getNodeManager().getRegisteredDataNodes(-1);
     final List<TSStatus> dataNodeResponseStatus =
-        Collections.synchronizedList(new ArrayList<>(onlineDataNodes.size()));
-    final CountDownLatch countDownLatch = new CountDownLatch(onlineDataNodes.size());
+        Collections.synchronizedList(new ArrayList<>(registeredDataNodes.size()));
+    final CountDownLatch countDownLatch = new CountDownLatch(registeredDataNodes.size());
     final TCreateFunctionRequest request =
         new TCreateFunctionRequest(functionName, className, uris);
 
-    for (TDataNodeInfo dataNodeInfo : onlineDataNodes) {
+    for (TDataNodeInfo dataNodeInfo : registeredDataNodes) {
       final TEndPoint endPoint = dataNodeInfo.getLocation().getInternalEndPoint();
       AsyncDataNodeClientPool.getInstance()
           .createFunction(
@@ -112,7 +112,7 @@ public class UDFManager {
     try {
       final List<TSStatus> nodeResponseList = dropFunctionOnDataNodes(functionName);
       final TSStatus configNodeStatus =
-          configManager.getConsensusManager().write(new DropFunctionReq(functionName)).getStatus();
+          configManager.getConsensusManager().write(new DropFunctionPlan(functionName)).getStatus();
       nodeResponseList.add(configNodeStatus);
       return RpcUtils.squashResponseStatusList(nodeResponseList);
     } catch (Exception e) {
@@ -125,14 +125,14 @@ public class UDFManager {
   }
 
   private List<TSStatus> dropFunctionOnDataNodes(String functionName) {
-    final List<TDataNodeInfo> onlineDataNodes =
-        configManager.getNodeManager().getOnlineDataNodes(-1);
+    final List<TDataNodeInfo> registeredDataNodes =
+        configManager.getNodeManager().getRegisteredDataNodes(-1);
     final List<TSStatus> dataNodeResponseStatus =
-        Collections.synchronizedList(new ArrayList<>(onlineDataNodes.size()));
-    final CountDownLatch countDownLatch = new CountDownLatch(onlineDataNodes.size());
+        Collections.synchronizedList(new ArrayList<>(registeredDataNodes.size()));
+    final CountDownLatch countDownLatch = new CountDownLatch(registeredDataNodes.size());
     final TDropFunctionRequest request = new TDropFunctionRequest(functionName);
 
-    for (TDataNodeInfo dataNodeInfo : onlineDataNodes) {
+    for (TDataNodeInfo dataNodeInfo : registeredDataNodes) {
       final TEndPoint endPoint = dataNodeInfo.getLocation().getInternalEndPoint();
       AsyncDataNodeClientPool.getInstance()
           .dropFunction(

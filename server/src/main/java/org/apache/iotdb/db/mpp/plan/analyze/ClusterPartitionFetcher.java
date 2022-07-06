@@ -18,11 +18,14 @@
  */
 package org.apache.iotdb.db.mpp.plan.analyze;
 
+import org.apache.iotdb.common.rpc.thrift.TConsensusGroupId;
 import org.apache.iotdb.common.rpc.thrift.TRegionReplicaSet;
+import org.apache.iotdb.common.rpc.thrift.TSStatus;
 import org.apache.iotdb.common.rpc.thrift.TSeriesPartitionSlot;
 import org.apache.iotdb.common.rpc.thrift.TTimePartitionSlot;
 import org.apache.iotdb.commons.client.IClientManager;
 import org.apache.iotdb.commons.consensus.PartitionRegionId;
+import org.apache.iotdb.commons.exception.IoTDBException;
 import org.apache.iotdb.commons.exception.MetadataException;
 import org.apache.iotdb.commons.partition.DataPartition;
 import org.apache.iotdb.commons.partition.DataPartitionQueryParam;
@@ -49,6 +52,7 @@ import org.apache.iotdb.db.exception.sql.StatementAnalyzeException;
 import org.apache.iotdb.db.metadata.utils.MetaUtils;
 import org.apache.iotdb.db.mpp.common.schematree.PathPatternTree;
 import org.apache.iotdb.db.service.metrics.recorder.CacheMetricsRecorder;
+import org.apache.iotdb.mpp.rpc.thrift.TRegionRouteReq;
 import org.apache.iotdb.rpc.TSStatusCode;
 import org.apache.iotdb.tsfile.utils.PublicBAOS;
 
@@ -69,6 +73,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 
@@ -143,6 +149,11 @@ public class ClusterPartitionFetcher implements IPartitionFetcher {
             == TSStatusCode.SUCCESS_STATUS.getStatusCode()) {
           schemaPartition = parseSchemaPartitionResp(schemaPartitionResp);
           partitionCache.updateSchemaPartitionCache(devicePaths, schemaPartition);
+        } else {
+          throw new RuntimeException(
+              new IoTDBException(
+                  schemaPartitionResp.getStatus().getMessage(),
+                  schemaPartitionResp.getStatus().getCode()));
         }
       }
       return schemaPartition;
@@ -219,12 +230,15 @@ public class ClusterPartitionFetcher implements IPartitionFetcher {
           client.getOrCreateDataPartition(constructDataPartitionReq(sgNameToQueryParamsMap));
       if (dataPartitionResp.getStatus().getCode() == TSStatusCode.SUCCESS_STATUS.getStatusCode()) {
         return parseDataPartitionResp(dataPartitionResp);
+      } else {
+        throw new StatementAnalyzeException(
+            "An error occurred when executing getOrCreateDataPartition():"
+                + dataPartitionResp.getStatus().getMessage());
       }
     } catch (TException | IOException e) {
       throw new StatementAnalyzeException(
           "An error occurred when executing getOrCreateDataPartition():" + e.getMessage());
     }
-    return null;
   }
 
   @Override
@@ -250,6 +264,11 @@ public class ClusterPartitionFetcher implements IPartitionFetcher {
       throw new StatementAnalyzeException(
           "An error occurred when executing getOrCreateDataPartition():" + e.getMessage());
     }
+  }
+
+  @Override
+  public boolean updateRegionCache(TRegionRouteReq req) {
+    return partitionCache.updateGroupIdToReplicaSetMap(req);
   }
 
   @Override
@@ -299,11 +318,18 @@ public class ClusterPartitionFetcher implements IPartitionFetcher {
                 storageGroupNamesNeedCreated.add(storageGroupNameNeedCreated.getFullPath());
               }
             }
+            Set<String> successFullyCreatedStorageGroup = new HashSet<>();
             for (String storageGroupName : storageGroupNamesNeedCreated) {
               TStorageGroupSchema storageGroupSchema = new TStorageGroupSchema();
               storageGroupSchema.setName(storageGroupName);
               TSetStorageGroupReq req = new TSetStorageGroupReq(storageGroupSchema);
-              client.setStorageGroup(req);
+              TSStatus tsStatus = client.setStorageGroup(req);
+              if (TSStatusCode.SUCCESS_STATUS.getStatusCode() == tsStatus.getCode()) {
+                successFullyCreatedStorageGroup.add(storageGroupName);
+              } else {
+                partitionCache.updateStorageCache(successFullyCreatedStorageGroup);
+                throw new RuntimeException(new IoTDBException(tsStatus.message, tsStatus.code));
+              }
             }
             partitionCache.updateStorageCache(storageGroupNamesNeedCreated);
             // third try to hit cache
@@ -448,6 +474,12 @@ public class ClusterPartitionFetcher implements IPartitionFetcher {
     private final String seriesSlotExecutorName;
 
     private final int seriesPartitionSlotNum;
+
+    /** the latest time when groupIdToReplicaSetMap updated. */
+    private final AtomicLong latestUpdateTime = new AtomicLong(0);
+    /** TConsensusGroupId -> TRegionReplicaSet */
+    private final Map<TConsensusGroupId, TRegionReplicaSet> groupIdToReplicaSetMap =
+        new ConcurrentHashMap<>();
 
     public PartitionCache(String seriesSlotExecutorName, int seriesPartitionSlotNum) {
       this.seriesSlotExecutorName = seriesSlotExecutorName;
@@ -721,6 +753,17 @@ public class ClusterPartitionFetcher implements IPartitionFetcher {
       } finally {
         dataPartitionCacheLock.writeLock().unlock();
       }
+    }
+
+    public boolean updateGroupIdToReplicaSetMap(TRegionRouteReq req) {
+      long timestamp = req.getTimestamp();
+      boolean result = (timestamp == latestUpdateTime.accumulateAndGet(timestamp, Math::max));
+      // if timestamp is greater than latestUpdateTime, then update
+      if (result) {
+        groupIdToReplicaSetMap.clear();
+        groupIdToReplicaSetMap.putAll(req.getRegionRouteMap());
+      }
+      return result;
     }
 
     @Override
