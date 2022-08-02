@@ -22,6 +22,8 @@ package org.apache.iotdb.consensus.multileader.service;
 import org.apache.iotdb.common.rpc.thrift.TSStatus;
 import org.apache.iotdb.commons.consensus.ConsensusGroupId;
 import org.apache.iotdb.consensus.common.request.ByteBufferConsensusRequest;
+import org.apache.iotdb.consensus.common.request.IConsensusRequest;
+import org.apache.iotdb.consensus.common.request.MultiLeaderConsensusRequest;
 import org.apache.iotdb.consensus.multileader.MultiLeaderConsensus;
 import org.apache.iotdb.consensus.multileader.MultiLeaderServerImpl;
 import org.apache.iotdb.consensus.multileader.thrift.MultiLeaderConsensusIService;
@@ -30,7 +32,6 @@ import org.apache.iotdb.consensus.multileader.thrift.TSyncLogReq;
 import org.apache.iotdb.consensus.multileader.thrift.TSyncLogRes;
 import org.apache.iotdb.rpc.TSStatusCode;
 
-import org.apache.thrift.TException;
 import org.apache.thrift.async.AsyncMethodCallback;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,8 +51,7 @@ public class MultiLeaderRPCServiceProcessor implements MultiLeaderConsensusIServ
   }
 
   @Override
-  public void syncLog(TSyncLogReq req, AsyncMethodCallback<TSyncLogRes> resultHandler)
-      throws TException {
+  public void syncLog(TSyncLogReq req, AsyncMethodCallback<TSyncLogRes> resultHandler) {
     try {
       ConsensusGroupId groupId =
           ConsensusGroupId.Factory.createFromTConsensusGroupId(req.getConsensusGroupId());
@@ -69,13 +69,30 @@ public class MultiLeaderRPCServiceProcessor implements MultiLeaderConsensusIServ
       }
       List<TSStatus> statuses = new ArrayList<>();
       // We use synchronized to ensure atomicity of executing multiple logs
-      synchronized (impl.getStateMachine()) {
-        for (TLogBatch batch : req.getBatches()) {
-          statuses.add(
-              impl.getStateMachine()
-                  .write(
-                      impl.buildIndexedConsensusRequestForRemoteRequest(
-                          new ByteBufferConsensusRequest(batch.data))));
+      if (!req.getBatches().isEmpty()) {
+        synchronized (impl.getStateMachine()) {
+          List<IConsensusRequest> consensusRequests = new ArrayList<>();
+          long currentSearchIndex = req.getBatches().get(0).getSearchIndex();
+          for (TLogBatch batch : req.getBatches()) {
+            IConsensusRequest request =
+                batch.isFromWAL()
+                    ? new MultiLeaderConsensusRequest(batch.data)
+                    : new ByteBufferConsensusRequest(batch.data);
+            // merge TLogBatch with same search index into one request
+            if (batch.getSearchIndex() != currentSearchIndex) {
+              statuses.add(
+                  impl.getStateMachine()
+                      .write(impl.buildIndexedConsensusRequestForRemoteRequest(consensusRequests)));
+              consensusRequests = new ArrayList<>();
+            }
+            consensusRequests.add(request);
+          }
+          // write last request
+          if (!consensusRequests.isEmpty()) {
+            statuses.add(
+                impl.getStateMachine()
+                    .write(impl.buildIndexedConsensusRequestForRemoteRequest(consensusRequests)));
+          }
         }
       }
       logger.debug("Execute TSyncLogReq for {} with result {}", req.consensusGroupId, statuses);

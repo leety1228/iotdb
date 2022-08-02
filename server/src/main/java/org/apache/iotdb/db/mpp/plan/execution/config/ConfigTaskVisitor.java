@@ -29,13 +29,20 @@ import org.apache.iotdb.db.mpp.plan.statement.metadata.DropFunctionStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.SetStorageGroupStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.SetTTLStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowClusterStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowConfigNodesStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowDataNodesStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowFunctionsStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowRegionStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowStorageGroupStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowTTLStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.UnSetTTLStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.CreateSchemaTemplateStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.SetSchemaTemplateStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.ShowNodesInSchemaTemplateStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.ShowPathSetTemplateStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.ShowSchemaTemplateStatement;
 import org.apache.iotdb.db.mpp.plan.statement.sys.AuthorStatement;
+import org.apache.iotdb.db.mpp.plan.statement.sys.ClearCacheStatement;
 import org.apache.iotdb.db.mpp.plan.statement.sys.FlushStatement;
 import org.apache.iotdb.tsfile.exception.NotImplementedException;
 
@@ -114,6 +121,11 @@ public class ConfigTaskVisitor
   }
 
   @Override
+  public IConfigTask visitClearCache(ClearCacheStatement clearCacheStatement, TaskContext context) {
+    return new ClearCacheTask(clearCacheStatement);
+  }
+
+  @Override
   public IConfigTask visitDropFunction(
       DropFunctionStatement dropFunctionStatement, TaskContext context) {
     return new DropFunctionTask(dropFunctionStatement);
@@ -131,9 +143,45 @@ public class ConfigTaskVisitor
   }
 
   @Override
+  public IConfigTask visitCreateSchemaTemplate(
+      CreateSchemaTemplateStatement createSchemaTemplateStatement, TaskContext context) {
+    return new CreateSchemaTemplateTask(createSchemaTemplateStatement);
+  }
+
+  @Override
+  public IConfigTask visitShowNodesInSchemaTemplate(
+      ShowNodesInSchemaTemplateStatement showNodesInSchemaTemplateStatement, TaskContext context) {
+    return new ShowNodesInSchemaTemplateTask(showNodesInSchemaTemplateStatement);
+  }
+
+  @Override
+  public IConfigTask visitShowSchemaTemplate(
+      ShowSchemaTemplateStatement showSchemaTemplateStatement, TaskContext context) {
+    return new ShowSchemaTemplateTask(showSchemaTemplateStatement);
+  }
+
+  @Override
+  public IConfigTask visitSetSchemaTemplate(
+      SetSchemaTemplateStatement setSchemaTemplateStatement, TaskContext context) {
+    return new SetSchemaTemplateTask(setSchemaTemplateStatement);
+  }
+
+  @Override
+  public IConfigTask visitShowPathSetTemplate(
+      ShowPathSetTemplateStatement showPathSetTemplateStatement, TaskContext context) {
+    return new ShowPathSetTemplateTask(showPathSetTemplateStatement);
+  }
+
+  @Override
   public IConfigTask visitShowDataNodes(
       ShowDataNodesStatement showDataNodesStatement, TaskContext context) {
     return new ShowDataNodesTask(showDataNodesStatement);
+  }
+
+  @Override
+  public IConfigTask visitShowConfigNodes(
+      ShowConfigNodesStatement showConfigNodesStatement, TaskContext context) {
+    return new ShowConfigNodesTask(showConfigNodesStatement);
   }
 
   public static class TaskContext {}

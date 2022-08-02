@@ -19,6 +19,7 @@
 
 package org.apache.iotdb.db.mpp.plan.execution.config.executor;
 
+import org.apache.iotdb.common.rpc.thrift.TClearCacheReq;
 import org.apache.iotdb.common.rpc.thrift.TFlushReq;
 import org.apache.iotdb.db.mpp.plan.execution.config.ConfigTaskResult;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.CountStorageGroupStatement;
@@ -29,6 +30,11 @@ import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowDataNodesStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowRegionStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowStorageGroupStatement;
 import org.apache.iotdb.db.mpp.plan.statement.metadata.ShowTTLStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.CreateSchemaTemplateStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.SetSchemaTemplateStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.ShowNodesInSchemaTemplateStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.ShowPathSetTemplateStatement;
+import org.apache.iotdb.db.mpp.plan.statement.metadata.template.ShowSchemaTemplateStatement;
 
 import com.google.common.util.concurrent.SettableFuture;
 
@@ -57,6 +63,8 @@ public interface IConfigTaskExecutor {
 
   SettableFuture<ConfigTaskResult> flush(TFlushReq tFlushReq);
 
+  SettableFuture<ConfigTaskResult> clearCache(TClearCacheReq tClearCacheReq);
+
   SettableFuture<ConfigTaskResult> showCluster();
 
   SettableFuture<ConfigTaskResult> showTTL(ShowTTLStatement showTTLStatement);
@@ -64,4 +72,21 @@ public interface IConfigTaskExecutor {
   SettableFuture<ConfigTaskResult> showRegion(ShowRegionStatement showRegionStatement);
 
   SettableFuture<ConfigTaskResult> showDataNodes(ShowDataNodesStatement showDataNodesStatement);
+
+  SettableFuture<ConfigTaskResult> showConfigNodes();
+
+  SettableFuture<ConfigTaskResult> createSchemaTemplate(
+      CreateSchemaTemplateStatement createSchemaTemplateStatement);
+
+  SettableFuture<ConfigTaskResult> showSchemaTemplate(
+      ShowSchemaTemplateStatement showSchemaTemplateStatement);
+
+  SettableFuture<ConfigTaskResult> showNodesInSchemaTemplate(
+      ShowNodesInSchemaTemplateStatement showNodesInSchemaTemplateStatement);
+
+  SettableFuture<ConfigTaskResult> setSchemaTemplate(
+      SetSchemaTemplateStatement setSchemaTemplateStatement);
+
+  SettableFuture<ConfigTaskResult> showPathSetTemplate(
+      ShowPathSetTemplateStatement showPathSetTemplateStatement);
 }
