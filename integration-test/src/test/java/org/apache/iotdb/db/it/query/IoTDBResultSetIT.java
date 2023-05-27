@@ -19,6 +19,7 @@
 
 package org.apache.iotdb.db.it.query;
 
+import org.apache.iotdb.db.mpp.common.header.ColumnHeaderConstant;
 import org.apache.iotdb.it.env.EnvFactory;
 import org.apache.iotdb.it.framework.IoTDBTestRunner;
 import org.apache.iotdb.itbase.category.ClusterIT;
@@ -49,7 +50,7 @@ public class IoTDBResultSetIT {
 
   private static final String[] SQLs =
       new String[] {
-        "SET STORAGE GROUP TO root.t1",
+        "CREATE DATABASE root.t1",
         "CREATE TIMESERIES root.t1.wf01.wt01.status WITH DATATYPE=BOOLEAN, ENCODING=PLAIN",
         "CREATE TIMESERIES root.t1.wf01.wt01.temperature WITH DATATYPE=FLOAT, ENCODING=RLE",
         "CREATE TIMESERIES root.t1.wf01.wt01.type WITH DATATYPE=INT32, ENCODING=RLE",
@@ -66,13 +67,13 @@ public class IoTDBResultSetIT {
 
   @BeforeClass
   public static void setUp() throws Exception {
-    EnvFactory.getEnv().initBeforeClass();
+    EnvFactory.getEnv().initClusterEnvironment();
     prepareData(SQLs);
   }
 
   @AfterClass
   public static void tearDown() throws Exception {
-    EnvFactory.getEnv().cleanAfterClass();
+    EnvFactory.getEnv().cleanClusterEnvironment();
   }
 
   @Test
@@ -138,27 +139,107 @@ public class IoTDBResultSetIT {
 
   @Test
   public void emptyQueryTest1() {
-    String expectedHeader = "Time,";
+    String expectedHeader = ColumnHeaderConstant.TIME + ",";
     resultSetEqualTest("select * from root.sg1.d1", expectedHeader, emptyResultSet);
   }
 
   @Test
   public void emptyQueryTest2() {
     String expectedHeader =
-        "Time,root.t1.wf01.wt02.grade,root.t1.wf01.wt02.temperature,root.t1.wf01.wt02.type,root.t1.wf01.wt02.status,";
+        ColumnHeaderConstant.TIME
+            + ","
+            + "root.t1.wf01.wt02.grade,"
+            + "root.t1.wf01.wt02.temperature,"
+            + "root.t1.wf01.wt02.type,"
+            + "root.t1.wf01.wt02.status,";
     resultSetEqualTest("select * from root.t1.wf01.wt02", expectedHeader, emptyResultSet);
   }
 
   @Test
   public void emptyShowTimeseriesTest() {
     String expectedHeader =
-        "timeseries,alias,storage group,dataType,encoding,compression,tags,attributes,";
+        ColumnHeaderConstant.TIMESERIES
+            + ","
+            + ColumnHeaderConstant.ALIAS
+            + ","
+            + ColumnHeaderConstant.DATABASE
+            + ","
+            + ColumnHeaderConstant.DATATYPE
+            + ","
+            + ColumnHeaderConstant.ENCODING
+            + ","
+            + ColumnHeaderConstant.COMPRESSION
+            + ","
+            + ColumnHeaderConstant.TAGS
+            + ","
+            + ColumnHeaderConstant.ATTRIBUTES
+            + ","
+            + ColumnHeaderConstant.DEADBAND
+            + ","
+            + ColumnHeaderConstant.DEADBAND_PARAMETERS
+            + ","
+            + ColumnHeaderConstant.VIEW_TYPE
+            + ",";
     resultSetEqualTest("show timeseries root.sg1.**", expectedHeader, emptyResultSet);
   }
 
   @Test
   public void emptyShowDeviceTest() {
-    String expectedHeader = "devices,isAligned,";
+    String expectedHeader =
+        ColumnHeaderConstant.DEVICE + "," + ColumnHeaderConstant.IS_ALIGNED + ",";
     resultSetEqualTest("show devices root.sg1.**", expectedHeader, emptyResultSet);
+  }
+
+  @Test
+  public void timeWasNullTest() throws Exception {
+    try (Connection connection = EnvFactory.getEnv().getConnection();
+        Statement statement = connection.createStatement()) {
+
+      // create timeseries
+      statement.execute(
+          "CREATE TIMESERIES root.sg1.d1.s1 WITH DATATYPE=INT64, ENCODING=RLE, COMPRESSOR=SNAPPY");
+      statement.execute(
+          "CREATE TIMESERIES root.sg1.d1.s2 WITH DATATYPE=INT64, ENCODING=RLE, COMPRESSOR=SNAPPY");
+      statement.execute(
+          "CREATE TIMESERIES root.sg1.d1.s3 WITH DATATYPE=INT64, ENCODING=RLE, COMPRESSOR=SNAPPY");
+
+      for (int i = 0; i < 10; i++) {
+        statement.addBatch(
+            "insert into root.sg1.d1(timestamp, s1, s2) values(" + i + "," + 1 + "," + 1 + ")");
+      }
+
+      statement.execute("insert into root.sg1.d1(timestamp, s3) values(103, 1)");
+      statement.execute("insert into root.sg1.d1(timestamp, s3) values(104, 1)");
+      statement.execute("insert into root.sg1.d1(timestamp, s3) values(105, 1)");
+      statement.executeBatch();
+      try (ResultSet resultSet = statement.executeQuery("select * from root.**")) {
+        ResultSetMetaData metaData = resultSet.getMetaData();
+        int columnCount = metaData.getColumnCount();
+        while (resultSet.next()) {
+          for (int i = 1; i <= columnCount; i++) {
+            int ct = metaData.getColumnType(i);
+            if (ct == Types.TIMESTAMP) {
+              if (resultSet.wasNull()) {
+                fail();
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  @Test
+  public void emptyLastQueryTest() {
+    String expectedHeader =
+        ColumnHeaderConstant.TIME
+            + ","
+            + ColumnHeaderConstant.TIMESERIES
+            + ","
+            + ColumnHeaderConstant.VALUE
+            + ","
+            + ColumnHeaderConstant.DATATYPE
+            + ",";
+    resultSetEqualTest("select last s1 from root.sg.d1", expectedHeader, emptyResultSet);
   }
 }

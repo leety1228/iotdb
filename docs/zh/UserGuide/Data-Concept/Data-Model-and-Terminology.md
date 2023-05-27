@@ -25,13 +25,13 @@
 
 根据企业组织结构和设备实体层次结构，我们将其物联网数据模型表示为如下图所示的属性层级组织结构，即电力集团层-风电场层-实体层-物理量层。其中 ROOT 为根节点，物理量层的每一个节点为叶子节点。IoTDB 采用树形结构定义数据模式，以从 ROOT 节点到叶子节点的路径来命名一个时间序列，层次间以“.”连接。例如，下图最左侧路径对应的时间序列名称为`ROOT.ln.wf01.wt01.status`。
 
-<img style="width:100%; max-width:800px; max-height:600px; margin-left:auto; margin-right:auto; display:block;" src="https://user-images.githubusercontent.com/19167280/123542457-5f511d00-d77c-11eb-8006-562d83069baa.png">
+<img style="width:100%; max-width:800px; max-height:600px; margin-left:auto; margin-right:auto; display:block;" src="https://alioss.timecho.com/docs/img/github/123542457-5f511d00-d77c-11eb-8006-562d83069baa.png">
 
 在上图所描述的实际场景中，有许多实体所采集的物理量相同，即具有相同的工况名称和类型，因此，可以声明一个**元数据模板**来定义可采集的物理量集合。在实践中，元数据模板的使用可帮助减少元数据的资源占用，详细内容参见 [元数据模板文档](./Schema-Template.md)。
 
 IoTDB 模型结构涉及的基本概念在下文将做详细叙述。
 
-## 物理量、实体、存储组、路径
+## 物理量、实体、数据库、路径
 
 ### 物理量（Measurement）
 
@@ -41,21 +41,23 @@ IoTDB 模型结构涉及的基本概念在下文将做详细叙述。
 
 **一个物理实体**，也称设备（device），是在实际场景中拥有物理量的设备或装置。在 IoTDB 当中，所有的物理量都有其对应的归属实体。
 
-### 存储组（Storage group）
+### 数据库（Database）
 
-**一组物理实体**，用户可以将任意前缀路径设置成存储组。如有 4 条时间序列`root.ln.wf01.wt01.status`, `root.ln.wf01.wt01.temperature`, `root.ln.wf02.wt02.hardware`, `root.ln.wf02.wt02.status`，路径`root.ln`下的两个实体 `wt01`, `wt02`可能属于同一个业主，或者同一个制造商，这时候就可以将前缀路径`root.ln`指定为一个存储组。未来`root.ln`下增加了新的实体，也将属于该存储组。
+用户可以将任意前缀路径设置成数据库。如有 4 条时间序列`root.ln.wf01.wt01.status`, `root.ln.wf01.wt01.temperature`, `root.ln.wf02.wt02.hardware`, `root.ln.wf02.wt02.status`，路径`root.ln`下的两个实体 `wt01`, `wt02`可能属于同一个业主，或者同一个制造商，这时候就可以将前缀路径`root.ln`指定为一个数据库。未来`root.ln`下增加了新的实体，也将属于该数据库。
 
-一个存储组中的所有实体的数据会存储在同一个文件夹下，不同存储组的实体数据会存储在磁盘的不同文件夹下，从而实现物理隔离。
+一个 database 中的所有数据会存储在同一批文件夹下，不同 database 的数据会存储在磁盘的不同文件夹下，从而实现物理隔离。
 
-> 注意 1：不允许将一个完整路径（如上例的`root.ln.wf01.wt01.status`) 设置成存储组。
+> 注意 1：不允许将一个完整路径（如上例的`root.ln.wf01.wt01.status`) 设置成 database。
 >
-> 注意 2：一个时间序列其前缀必须属于某个存储组。在创建时间序列之前，用户必须设定该序列属于哪个存储组（Storage Group）。只有设置了存储组的时间序列才可以被持久化在磁盘上。
+> 注意 2：一个时间序列其前缀必须属于某个 database。在创建时间序列之前，用户必须设定该序列属于哪个database。只有设置了 database 的时间序列才可以被持久化在磁盘上。
+> 
+> 注意 3：被设置为数据库的路径总字符数不能超过64，包括路径开头的`root.`这5个字符。
 
-一个前缀路径一旦被设定成存储组后就不可以再更改这个存储组的设定。
+一个前缀路径一旦被设定成 database 后就不可以再更改这个 database 的设定。
 
-一个存储组设定后，其对应的前缀路径的祖先层级与孩子及后裔层级也不允许再设置存储组（如，`root.ln`设置存储组后，root 层级与`root.ln.wf01`不允许被设置为存储组）。
+一个 database 设定后，其对应的前缀路径的祖先层级与孩子及后裔层级也不允许再设置 database（如，`root.ln`设置 database 后，root 层级与`root.ln.wf01`不允许被设置为 database）。
 
-存储组节点名只支持中英文字符、数字、下划线和中划线的组合。例如`root. 存储组_1-组1` 。
+Database 节点名只支持中英文字符、数字和下划线的组合。例如`root.数据库_1` 。
 
 ### 路径（Path）
 
@@ -83,10 +85,10 @@ wildcard
 
 * `root` 作为一个保留字符，它只允许出现在下文提到的时间序列的开头，若其他层级出现 `root`，则无法解析，提示报错。
 * 除了时间序列的开头的层级（`root`）外，其他的层级支持的字符如下：
-  * [ 0-9 a-z A-Z _ : @ # $ { } ] （字母，数字，部分特殊字符）
+  * [ 0-9 a-z A-Z _ ] （字母，数字，下划线）
   * ['\u2E80'..'\u9FFF'] （UNICODE 中文字符）
-* 特别地，如果系统在 Windows 系统上部署，那么存储组路径结点名是大小写不敏感的。例如，同时创建`root.ln` 和 `root.LN` 是不被允许的。
-* 如果需要在路径结点名中用特殊字符，可以用反引号引用路径结点名，具体使用方法可以参考[语法约定](../Reference/Syntax-Conventions.md)。
+* 特别地，如果系统在 Windows 系统上部署，那么 database 路径结点名是大小写不敏感的。例如，同时创建`root.ln` 和 `root.LN` 是不被允许的。
+* 如果需要在路径结点名中用特殊字符，可以用反引号引用路径结点名，具体使用方法可以参考[语法约定](../Syntax-Conventions/Literal-Values.md)。
 
 ### 路径模式（Path Pattern）
 
@@ -133,6 +135,6 @@ wildcard
 
 插入数据时，对齐的时间序列中某列的某些行允许有空值。
 
-<img style="width:100%; max-width:800px; max-height:600px; margin-left:auto; margin-right:auto; display:block;" src="https://user-images.githubusercontent.com/19167280/114125919-f4850800-9929-11eb-8211-81d4c04af1ec.png">
+<img style="width:100%; max-width:800px; max-height:600px; margin-left:auto; margin-right:auto; display:block;" src="https://alioss.timecho.com/docs/img/github/114125919-f4850800-9929-11eb-8211-81d4c04af1ec.png">
 
 在后续数据定义语言、数据操作语言和 Java 原生接口章节，将对涉及到对齐时间序列的各种操作进行逐一介绍。

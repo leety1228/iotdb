@@ -20,6 +20,7 @@ package org.apache.iotdb.db.rescon;
 
 import org.apache.iotdb.db.conf.IoTDBConfig;
 import org.apache.iotdb.db.conf.IoTDBDescriptor;
+import org.apache.iotdb.db.utils.datastructure.TVListSortAlgorithm;
 import org.apache.iotdb.tsfile.exception.write.UnSupportedDataTypeException;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.utils.Binary;
@@ -40,6 +41,8 @@ public class PrimitiveArrayManager {
 
   public static final int ARRAY_SIZE = CONFIG.getPrimitiveArraySize();
 
+  public static final TVListSortAlgorithm TVLIST_SORT_ALGORITHM = CONFIG.getTvListSortAlgorithm();
+
   /**
    * The actual used memory will be 50% larger than the statistic, so we need to limit the size of
    * POOLED_ARRAYS_MEMORY_THRESHOLD, make it smaller than its actual allowed value.
@@ -48,7 +51,7 @@ public class PrimitiveArrayManager {
 
   /** threshold total size of arrays for all data types */
   private static final double POOLED_ARRAYS_MEMORY_THRESHOLD =
-      CONFIG.getAllocateMemoryForWrite()
+      CONFIG.getAllocateMemoryForStorageEngine()
           * CONFIG.getBufferedArraysMemoryProportion()
           / AMPLIFICATION_FACTOR;
 
@@ -179,8 +182,8 @@ public class PrimitiveArrayManager {
       int newLimit = (int) (limitBase * ratios[i]);
       LIMITS[i] = newLimit;
 
-      if (LOGGER.isInfoEnabled() && oldLimit != newLimit) {
-        LOGGER.info(
+      if (LOGGER.isDebugEnabled() && oldLimit != newLimit) {
+        LOGGER.debug(
             "limit of {} array deque size updated: {} -> {}",
             TSDataType.deserialize((byte) i).name(),
             oldLimit,
@@ -194,10 +197,12 @@ public class PrimitiveArrayManager {
     for (int limit : LIMITS) {
       limitUpdateThreshold += limit;
     }
-    LOGGER.info(
-        "limitUpdateThreshold of PrimitiveArrayManager updated: {} -> {}",
-        oldLimitUpdateThreshold,
-        limitUpdateThreshold);
+    if (LOGGER.isDebugEnabled() && oldLimitUpdateThreshold != limitUpdateThreshold) {
+      LOGGER.debug(
+          "limitUpdateThreshold of PrimitiveArrayManager updated: {} -> {}",
+          oldLimitUpdateThreshold,
+          limitUpdateThreshold);
+    }
 
     for (AtomicLong allocationRequestCount : ALLOCATION_REQUEST_COUNTS) {
       allocationRequestCount.set(0);

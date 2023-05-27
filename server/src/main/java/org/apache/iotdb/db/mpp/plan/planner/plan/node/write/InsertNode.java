@@ -20,17 +20,17 @@ package org.apache.iotdb.db.mpp.plan.planner.plan.node.write;
 
 import org.apache.iotdb.common.rpc.thrift.TRegionReplicaSet;
 import org.apache.iotdb.commons.path.PartialPath;
-import org.apache.iotdb.consensus.multileader.wal.ConsensusReqReader;
+import org.apache.iotdb.commons.utils.TestOnly;
+import org.apache.iotdb.consensus.iot.wal.ConsensusReqReader;
 import org.apache.iotdb.db.conf.IoTDBDescriptor;
-import org.apache.iotdb.db.exception.metadata.DataTypeMismatchException;
 import org.apache.iotdb.db.metadata.idtable.entry.IDeviceID;
-import org.apache.iotdb.db.mpp.common.schematree.ISchemaTree;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeId;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.WritePlanNode;
 import org.apache.iotdb.db.wal.buffer.IWALByteBufferView;
 import org.apache.iotdb.db.wal.utils.WALWriteUtils;
 import org.apache.iotdb.tsfile.exception.NotImplementedException;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
+import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
 import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
 
 import java.io.DataInputStream;
@@ -38,15 +38,11 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 public abstract class InsertNode extends WritePlanNode {
 
-  /** this insert node doesn't need to participate in multi-leader consensus */
+  /** this insert node doesn't need to participate in iot consensus */
   public static final long NO_CONSENSUS_INDEX = ConsensusReqReader.DEFAULT_SEARCH_INDEX;
 
   /**
@@ -59,11 +55,8 @@ public abstract class InsertNode extends WritePlanNode {
   protected MeasurementSchema[] measurementSchemas;
   protected String[] measurements;
   protected TSDataType[] dataTypes;
-  // TODO(INSERT) need to change it to a function handle to update last time value
-  //  protected IMeasurementMNode[] measurementMNodes;
 
-  /** index of failed measurements -> info including measurement, data type and value */
-  protected Map<Integer, FailedMeasurementInfo> failedMeasurementIndex2Info;
+  protected int failedMeasurementNumber = 0;
 
   /**
    * device id reference, for reuse device id in both id table and memtable <br>
@@ -137,6 +130,10 @@ public abstract class InsertNode extends WritePlanNode {
     return dataTypes;
   }
 
+  public TSDataType getDataType(int index) {
+    return dataTypes[index];
+  }
+
   public void setDataTypes(TSDataType[] dataTypes) {
     this.dataTypes = dataTypes;
   }
@@ -177,7 +174,13 @@ public abstract class InsertNode extends WritePlanNode {
       if (measurements[i] == null) {
         continue;
       }
-      byteLen += WALWriteUtils.sizeToWrite(measurementSchemas[i]);
+      if (IoTDBDescriptor.getInstance().getConfig().isClusterMode()) {
+        byteLen += WALWriteUtils.sizeToWrite(measurementSchemas[i]);
+      } else {
+        byteLen += ReadWriteIOUtils.sizeToWrite(measurements[i]);
+        // datatype size
+        byteLen++;
+      }
     }
     return byteLen;
   }
@@ -189,7 +192,14 @@ public abstract class InsertNode extends WritePlanNode {
       if (measurements[i] == null) {
         continue;
       }
-      WALWriteUtils.write(measurementSchemas[i], buffer);
+
+      // serialize measurementId only for standalone version for better write performance
+      if (IoTDBDescriptor.getInstance().getConfig().isClusterMode()) {
+        WALWriteUtils.write(measurementSchemas[i], buffer);
+      } else {
+        WALWriteUtils.write(measurements[i], buffer);
+        WALWriteUtils.write(dataTypes[i], buffer);
+      }
     }
   }
 
@@ -198,14 +208,20 @@ public abstract class InsertNode extends WritePlanNode {
    * created before calling this
    */
   protected void deserializeMeasurementSchemas(DataInputStream stream) throws IOException {
-    for (int i = 0; i < measurementSchemas.length; i++) {
-      measurementSchemas[i] = MeasurementSchema.deserializeFrom(stream);
-      measurements[i] = measurementSchemas[i].getMeasurementId();
+    for (int i = 0; i < measurements.length; i++) {
+      if (IoTDBDescriptor.getInstance().getConfig().isClusterMode()) {
+        measurementSchemas[i] = MeasurementSchema.deserializeFrom(stream);
+        measurements[i] = measurementSchemas[i].getMeasurementId();
+        dataTypes[i] = measurementSchemas[i].getType();
+      } else {
+        measurements[i] = ReadWriteIOUtils.readString(stream);
+        dataTypes[i] = TSDataType.deserialize(ReadWriteIOUtils.readByte(stream));
+      }
     }
   }
 
   protected void deserializeMeasurementSchemas(ByteBuffer buffer) {
-    for (int i = 0; i < measurementSchemas.length; i++) {
+    for (int i = 0; i < measurements.length; i++) {
       measurementSchemas[i] = MeasurementSchema.deserializeFrom(buffer);
       measurements[i] = measurementSchemas[i].getMeasurementId();
     }
@@ -216,45 +232,20 @@ public abstract class InsertNode extends WritePlanNode {
     return dataRegionReplicaSet;
   }
 
-  public abstract boolean validateAndSetSchema(ISchemaTree schemaTree);
-
-  /** Check whether data types are matched with measurement schemas */
-  protected boolean selfCheckDataTypes() {
-    for (int i = 0; i < measurementSchemas.length; i++) {
-      if (dataTypes[i] != measurementSchemas[i].getType()) {
-        if (!IoTDBDescriptor.getInstance().getConfig().isEnablePartialInsert()) {
-          return false;
-        } else {
-          markFailedMeasurement(
-              i,
-              new DataTypeMismatchException(
-                  devicePath.getFullPath(),
-                  measurements[i],
-                  measurementSchemas[i].getType(),
-                  dataTypes[i],
-                  getMinTime(),
-                  getFirstValueOfIndex(i)));
-        }
-      }
-    }
-    return true;
-  }
-
   public abstract long getMinTime();
 
-  public abstract Object getFirstValueOfIndex(int index);
+  /**
+   * Notice: Call this method ONLY when using IOT_CONSENSUS, other consensus protocol cannot
+   * distinguish whether the insertNode sync from leader by this method.
+   * isSyncFromLeaderWhenUsingIoTConsensus == true means this node is a follower
+   */
+  public boolean isSyncFromLeaderWhenUsingIoTConsensus() {
+    return searchIndex == ConsensusReqReader.DEFAULT_SEARCH_INDEX;
+  }
 
   // region partial insert
-  /**
-   * Mark failed measurement, measurements[index], dataTypes[index] and values/columns[index] would
-   * be null. We'd better use "measurements[index] == null" to determine if the measurement failed.
-   * <br>
-   * This method is not concurrency-safe.
-   *
-   * @param index failed measurement index
-   * @param cause cause Exception of failure
-   */
-  public void markFailedMeasurement(int index, Exception cause) {
+  @TestOnly
+  public void markFailedMeasurement(int index) {
     throw new UnsupportedOperationException();
   }
 
@@ -267,58 +258,12 @@ public abstract class InsertNode extends WritePlanNode {
     return false;
   }
 
-  public boolean hasFailedMeasurements() {
-    return failedMeasurementIndex2Info != null && !failedMeasurementIndex2Info.isEmpty();
+  public void setFailedMeasurementNumber(int failedMeasurementNumber) {
+    this.failedMeasurementNumber = failedMeasurementNumber;
   }
 
   public int getFailedMeasurementNumber() {
-    return failedMeasurementIndex2Info == null ? 0 : failedMeasurementIndex2Info.size();
-  }
-
-  public List<String> getFailedMeasurements() {
-    return failedMeasurementIndex2Info == null
-        ? Collections.emptyList()
-        : failedMeasurementIndex2Info.values().stream()
-            .map(info -> info.measurement)
-            .collect(Collectors.toList());
-  }
-
-  public List<Exception> getFailedExceptions() {
-    return failedMeasurementIndex2Info == null
-        ? Collections.emptyList()
-        : failedMeasurementIndex2Info.values().stream()
-            .map(info -> info.cause)
-            .collect(Collectors.toList());
-  }
-
-  public List<String> getFailedMessages() {
-    return failedMeasurementIndex2Info == null
-        ? Collections.emptyList()
-        : failedMeasurementIndex2Info.values().stream()
-            .map(
-                info -> {
-                  Throwable cause = info.cause;
-                  while (cause.getCause() != null) {
-                    cause = cause.getCause();
-                  }
-                  return cause.getMessage();
-                })
-            .collect(Collectors.toList());
-  }
-
-  protected static class FailedMeasurementInfo {
-    protected String measurement;
-    protected TSDataType dataType;
-    protected Object value;
-    protected Exception cause;
-
-    public FailedMeasurementInfo(
-        String measurement, TSDataType dataType, Object value, Exception cause) {
-      this.measurement = measurement;
-      this.dataType = dataType;
-      this.value = value;
-      this.cause = cause;
-    }
+    return failedMeasurementNumber;
   }
   // endregion
 

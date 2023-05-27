@@ -46,7 +46,7 @@ Apache IoTDB 集成测试的环境一共有3种，分别为**本地单机测试�
 
 #### 1. 集成测试类和注解
 
-构建的集成测试类时，开发者需要在 Apache IoTDB 的 [integration-test](https://github.com/apache/iotdb/tree/master/integration-test) 模块中创建测试类。类名应当能够精简准确地表述该集成测试的目的。除用于服务其他测试用例的类外，含集成测试用例用于测试 Apache IoTDB 功能的类，应当命名为“功能+IT”。例如，用于测试IoTDB自动注册元数据功能的集成测试命名为“<font color=green>IoTDBAutoCreateSchema</font><font color=red>IT</font>”。
+构建的集成测试类时，开发者需要在 Apache IoTDB 的 [integration-test](https://github.com/apache/iotdb/tree/master/integration-test) 模块中创建测试类。类名应当能够精简准确地表述该集成测试的目的。除用于服务其他测试用例的类外，含集成测试用例用于测试 Apache IoTDB 功能的类，应当命名为“功能+IT”。例如，用于测试IoTDB自动注册元数据功能的集成测试命名为“<span style="color:green">IoTDBAutoCreateSchema</span><span style="color:red">IT</span>”。
 
 - Category 注解：**在构建集成测试类时，需要显式地通过引入```@Category```注明测试环境** ，测试环境用```LocalStandaloneIT.class```、```ClusterIT.class``` 和 ```RemoteIT.class```来表示，分别与“Apache IoTDB 集成测试的环境”中的本地单机测试环境、本地集群测试环境和远程测试环境对应。标签内是测试环境的集合，可以包含多个元素，表示在多种环境下分别测试。**一般情况下，标签```LocalStandaloneIT.class``` 和 ```ClusterIT.class``` 是必须添加的。** 当某些功能仅支持单机版 IoTDB 时可以只保留```LocalStandaloneIT.class```。
 - RunWith 注解： 每一个集成测试类上都需要添加 ```@RunWith(IoTDBTestRunner.class)``` 标签。
@@ -73,7 +73,7 @@ public class IoTDBAlignByDeviceIT {
 
 测试前的准备工作包括启动 IoTDB（单机或集群）实例和测试用的数据准备。这些逻辑在setUp方法内实现。其中setUp方法前需要添加```@BeforeClass``` 或 ```@Before``` 标签，前者表示该方法为当前集成测试执行的第 1 个方法，并且在集成测试运行时只执行 1 次，后者表示在运行当前集成测试的每 1 个测试方法前，该方法都会被执行 1 次。
 - IoTDB 实例启动通过调用工厂类来实现，即```EnvFactory.getEnv().initBeforeClass()```。
-- 测试用的数据准备包括按测试需要提前注册存储组、注册时间序列、写入时间序列数据等。建议在测试类内实现单独的方法来准备数据，如insertData()。若需要写入多条数据，请使用批量写入的接口（JDBC中的executeBatch接口，或Session API 中的 insertRecords、insertTablets 等接口）。
+- 测试用的数据准备包括按测试需要提前注册 database 、注册时间序列、写入时间序列数据等。建议在测试类内实现单独的方法来准备数据，如insertData()。若需要写入多条数据，请使用批量写入的接口（JDBC中的executeBatch接口，或Session API 中的 insertRecords、insertTablets 等接口）。
 
 ```java
 @BeforeClass
@@ -99,7 +99,7 @@ public static void tearDown() throws Exception {
 
 #### 3. 实现集成测试逻辑
 
-Apache IoTDB 的集成测试以黑盒测试的方式进行，测试方法的名称为“测试的功能点+Test”，例如“<font color=green>selectWithAlias</font><font color=red>Test</font>”。测试通过 JDBC 或 Session API 的接口来完成。
+Apache IoTDB 的集成测试以黑盒测试的方式进行，测试方法的名称为“测试的功能点+Test”，例如“<span style="color:green">selectWithAlias</span><span style="color:red">Test</span>”。测试通过 JDBC 或 Session API 的接口来完成。
 
 1、使用JDBC接口
 
@@ -126,11 +126,11 @@ public void exampleTest() throws Exception {
   try (Connection connection = EnvFactory.getEnv().getConnection();
       Statement statement = connection.createStatement()) {
     // 使用 execute() 方法设置存储组
-    statement.execute("set storage group to root.sg");
+    statement.execute("CREATE DATABASE root.sg");
     // 使用 executeQuery() 方法查询存储组
-    try (ResultSet resultSet = statement.executeQuery("show storage group")) {
+    try (ResultSet resultSet = statement.executeQuery("show databases")) {
       if (resultSet.next()) {
-        String storageGroupPath = resultSet.getString("storage group");
+        String storageGroupPath = resultSet.getString("database");
         Assert.assertEquals("root.sg", storageGroupPath);
       } else {
         Assert.fail("This ResultSet is empty.");

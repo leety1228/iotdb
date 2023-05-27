@@ -51,8 +51,8 @@ public class LimitOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
-    TsBlock block = child.next();
+  public TsBlock next() throws Exception {
+    TsBlock block = child.nextWithTimer();
     if (block == null) {
       return null;
     }
@@ -67,8 +67,8 @@ public class LimitOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean hasNext() {
-    return remainingLimit > 0 && child.hasNext();
+  public boolean hasNext() throws Exception {
+    return remainingLimit > 0 && child.hasNextWithTimer();
   }
 
   @Override
@@ -77,7 +77,22 @@ public class LimitOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean isFinished() {
+  public boolean isFinished() throws Exception {
     return remainingLimit == 0 || child.isFinished();
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    return child.calculateMaxPeekMemory();
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    return child.calculateMaxReturnSize();
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    return child.calculateRetainedSizeAfterCallingNext();
   }
 }

@@ -23,16 +23,15 @@ import org.apache.iotdb.tsfile.exception.write.UnSupportedDataTypeException;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.file.metadata.statistics.IntegerStatistics;
 import org.apache.iotdb.tsfile.file.metadata.statistics.Statistics;
-import org.apache.iotdb.tsfile.read.common.TimeRange;
 import org.apache.iotdb.tsfile.read.common.block.column.Column;
 import org.apache.iotdb.tsfile.read.common.block.column.ColumnBuilder;
-import org.apache.iotdb.tsfile.read.common.block.column.TimeColumn;
+import org.apache.iotdb.tsfile.utils.BitMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
 public class SumAccumulator implements Accumulator {
 
-  private TSDataType seriesDataType;
+  private final TSDataType seriesDataType;
   private double sumValue = 0;
   private boolean initResult = false;
 
@@ -42,16 +41,20 @@ public class SumAccumulator implements Accumulator {
 
   // Column should be like: | Time | Value |
   @Override
-  public int addInput(Column[] column, TimeRange timeRange) {
+  public void addInput(Column[] column, BitMap bitMap, int lastIndex) {
     switch (seriesDataType) {
       case INT32:
-        return addIntInput(column, timeRange);
+        addIntInput(column, bitMap, lastIndex);
+        return;
       case INT64:
-        return addLongInput(column, timeRange);
+        addLongInput(column, bitMap, lastIndex);
+        return;
       case FLOAT:
-        return addFloatInput(column, timeRange);
+        addFloatInput(column, bitMap, lastIndex);
+        return;
       case DOUBLE:
-        return addDoubleInput(column, timeRange);
+        addDoubleInput(column, bitMap, lastIndex);
+        return;
       case TEXT:
       case BOOLEAN:
       default:
@@ -91,6 +94,7 @@ public class SumAccumulator implements Accumulator {
     if (finalResult.isNull(0)) {
       return;
     }
+    initResult = true;
     sumValue = finalResult.getDouble(0);
   }
 
@@ -135,75 +139,51 @@ public class SumAccumulator implements Accumulator {
     return TSDataType.DOUBLE;
   }
 
-  private int addIntInput(Column[] column, TimeRange timeRange) {
-    TimeColumn timeColumn = (TimeColumn) column[0];
-    int curPositionCount = timeColumn.getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = timeColumn.getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  private void addIntInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
         initResult = true;
         sumValue += column[1].getInt(i);
       }
     }
-    return timeColumn.getPositionCount();
   }
 
-  private int addLongInput(Column[] column, TimeRange timeRange) {
-    TimeColumn timeColumn = (TimeColumn) column[0];
-    int curPositionCount = timeColumn.getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = timeColumn.getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  private void addLongInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
         initResult = true;
         sumValue += column[1].getLong(i);
       }
     }
-    return timeColumn.getPositionCount();
   }
 
-  private int addFloatInput(Column[] column, TimeRange timeRange) {
-    TimeColumn timeColumn = (TimeColumn) column[0];
-    int curPositionCount = timeColumn.getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = timeColumn.getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  private void addFloatInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
         initResult = true;
         sumValue += column[1].getFloat(i);
       }
     }
-    return timeColumn.getPositionCount();
   }
 
-  private int addDoubleInput(Column[] column, TimeRange timeRange) {
-    TimeColumn timeColumn = (TimeColumn) column[0];
-    int curPositionCount = timeColumn.getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = timeColumn.getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  private void addDoubleInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
         initResult = true;
         sumValue += column[1].getDouble(i);
       }
     }
-    return timeColumn.getPositionCount();
   }
 }

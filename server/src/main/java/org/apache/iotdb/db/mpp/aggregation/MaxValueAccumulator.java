@@ -22,18 +22,17 @@ package org.apache.iotdb.db.mpp.aggregation;
 import org.apache.iotdb.tsfile.exception.write.UnSupportedDataTypeException;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.file.metadata.statistics.Statistics;
-import org.apache.iotdb.tsfile.read.common.TimeRange;
 import org.apache.iotdb.tsfile.read.common.block.column.Column;
 import org.apache.iotdb.tsfile.read.common.block.column.ColumnBuilder;
-import org.apache.iotdb.tsfile.read.common.block.column.TimeColumn;
+import org.apache.iotdb.tsfile.utils.BitMap;
 import org.apache.iotdb.tsfile.utils.TsPrimitiveType;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
 public class MaxValueAccumulator implements Accumulator {
 
-  private TSDataType seriesDataType;
-  private TsPrimitiveType maxResult;
+  private final TSDataType seriesDataType;
+  private final TsPrimitiveType maxResult;
   private boolean initResult;
 
   public MaxValueAccumulator(TSDataType seriesDataType) {
@@ -43,16 +42,20 @@ public class MaxValueAccumulator implements Accumulator {
 
   // Column should be like: | Time | Value |
   @Override
-  public int addInput(Column[] column, TimeRange timeRange) {
+  public void addInput(Column[] column, BitMap bitMap, int lastIndex) {
     switch (seriesDataType) {
       case INT32:
-        return addIntInput(column, timeRange);
+        addIntInput(column, bitMap, lastIndex);
+        return;
       case INT64:
-        return addLongInput(column, timeRange);
+        addLongInput(column, bitMap, lastIndex);
+        return;
       case FLOAT:
-        return addFloatInput(column, timeRange);
+        addFloatInput(column, bitMap, lastIndex);
+        return;
       case DOUBLE:
-        return addDoubleInput(column, timeRange);
+        addDoubleInput(column, bitMap, lastIndex);
+        return;
       case TEXT:
       case BOOLEAN:
       default:
@@ -121,7 +124,26 @@ public class MaxValueAccumulator implements Accumulator {
     if (finalResult.isNull(0)) {
       return;
     }
-    maxResult.setObject(finalResult.getObject(0));
+    initResult = true;
+    switch (seriesDataType) {
+      case INT32:
+        maxResult.setInt(finalResult.getInt(0));
+        break;
+      case INT64:
+        maxResult.setLong(finalResult.getLong(0));
+        break;
+      case FLOAT:
+        maxResult.setFloat(finalResult.getFloat(0));
+        break;
+      case DOUBLE:
+        maxResult.setDouble(finalResult.getDouble(0));
+        break;
+      case TEXT:
+      case BOOLEAN:
+      default:
+        throw new UnSupportedDataTypeException(
+            String.format("Unsupported data type in MaxValue: %s", seriesDataType));
+    }
   }
 
   // columnBuilder should be single in countAccumulator
@@ -201,21 +223,15 @@ public class MaxValueAccumulator implements Accumulator {
     return maxResult.getDataType();
   }
 
-  private int addIntInput(Column[] column, TimeRange timeRange) {
-    TimeColumn timeColumn = (TimeColumn) column[0];
-    int curPositionCount = timeColumn.getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = timeColumn.getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  private void addIntInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
         updateIntResult(column[1].getInt(i));
       }
     }
-    return timeColumn.getPositionCount();
   }
 
   private void updateIntResult(int maxVal) {
@@ -225,21 +241,15 @@ public class MaxValueAccumulator implements Accumulator {
     }
   }
 
-  private int addLongInput(Column[] column, TimeRange timeRange) {
-    TimeColumn timeColumn = (TimeColumn) column[0];
-    int curPositionCount = timeColumn.getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = timeColumn.getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  private void addLongInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
         updateLongResult(column[1].getLong(i));
       }
     }
-    return timeColumn.getPositionCount();
   }
 
   private void updateLongResult(long maxVal) {
@@ -249,21 +259,15 @@ public class MaxValueAccumulator implements Accumulator {
     }
   }
 
-  private int addFloatInput(Column[] column, TimeRange timeRange) {
-    TimeColumn timeColumn = (TimeColumn) column[0];
-    int curPositionCount = timeColumn.getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = timeColumn.getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  private void addFloatInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
         updateFloatResult(column[1].getFloat(i));
       }
     }
-    return timeColumn.getPositionCount();
   }
 
   private void updateFloatResult(float maxVal) {
@@ -273,21 +277,15 @@ public class MaxValueAccumulator implements Accumulator {
     }
   }
 
-  private int addDoubleInput(Column[] column, TimeRange timeRange) {
-    TimeColumn timeColumn = (TimeColumn) column[0];
-    int curPositionCount = timeColumn.getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = timeColumn.getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  private void addDoubleInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
         updateDoubleResult(column[1].getDouble(i));
       }
     }
-    return timeColumn.getPositionCount();
   }
 
   private void updateDoubleResult(double maxVal) {

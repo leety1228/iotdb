@@ -19,6 +19,7 @@
 package org.apache.iotdb.db.query.reader.chunk;
 
 import org.apache.iotdb.db.engine.cache.ChunkCache;
+import org.apache.iotdb.db.mpp.metric.SeriesScanCostMetricSet;
 import org.apache.iotdb.tsfile.file.metadata.AlignedChunkMetadata;
 import org.apache.iotdb.tsfile.file.metadata.ChunkMetadata;
 import org.apache.iotdb.tsfile.file.metadata.IChunkMetadata;
@@ -32,9 +33,14 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.apache.iotdb.db.mpp.metric.SeriesScanCostMetricSet.CONSTRUCT_CHUNK_READER_ALIGNED_DISK;
+import static org.apache.iotdb.db.mpp.metric.SeriesScanCostMetricSet.INIT_CHUNK_READER_ALIGNED_DISK;
+
 public class DiskAlignedChunkLoader implements IChunkLoader {
 
   private final boolean debug;
+  private static final SeriesScanCostMetricSet SERIES_SCAN_COST_METRIC_SET =
+      SeriesScanCostMetricSet.getInstance();
 
   public DiskAlignedChunkLoader(boolean debug) {
     this.debug = debug;
@@ -51,17 +57,29 @@ public class DiskAlignedChunkLoader implements IChunkLoader {
   @Override
   public IChunkReader getChunkReader(IChunkMetadata chunkMetaData, Filter timeFilter)
       throws IOException {
-    AlignedChunkMetadata alignedChunkMetadata = (AlignedChunkMetadata) chunkMetaData;
-    Chunk timeChunk =
-        ChunkCache.getInstance()
-            .get((ChunkMetadata) alignedChunkMetadata.getTimeChunkMetadata(), debug);
-    List<Chunk> valueChunkList = new ArrayList<>();
-    for (IChunkMetadata valueChunkMetadata : alignedChunkMetadata.getValueChunkMetadataList()) {
-      valueChunkList.add(
-          valueChunkMetadata == null
-              ? null
-              : ChunkCache.getInstance().get((ChunkMetadata) valueChunkMetadata, debug));
+    long t1 = System.nanoTime();
+    try {
+      AlignedChunkMetadata alignedChunkMetadata = (AlignedChunkMetadata) chunkMetaData;
+      Chunk timeChunk =
+          ChunkCache.getInstance()
+              .get((ChunkMetadata) alignedChunkMetadata.getTimeChunkMetadata(), debug);
+      List<Chunk> valueChunkList = new ArrayList<>();
+      for (IChunkMetadata valueChunkMetadata : alignedChunkMetadata.getValueChunkMetadataList()) {
+        valueChunkList.add(
+            valueChunkMetadata == null
+                ? null
+                : ChunkCache.getInstance().get((ChunkMetadata) valueChunkMetadata, debug));
+      }
+
+      long t2 = System.nanoTime();
+      IChunkReader chunkReader = new AlignedChunkReader(timeChunk, valueChunkList, timeFilter);
+      SERIES_SCAN_COST_METRIC_SET.recordSeriesScanCost(
+          INIT_CHUNK_READER_ALIGNED_DISK, System.nanoTime() - t2);
+
+      return chunkReader;
+    } finally {
+      SERIES_SCAN_COST_METRIC_SET.recordSeriesScanCost(
+          CONSTRUCT_CHUNK_READER_ALIGNED_DISK, System.nanoTime() - t1);
     }
-    return new AlignedChunkReader(timeChunk, valueChunkList, timeFilter);
   }
 }

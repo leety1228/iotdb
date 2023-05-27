@@ -20,32 +20,16 @@
 package org.apache.iotdb.db.mpp.plan.expression.leaf;
 
 import org.apache.iotdb.commons.path.PartialPath;
-import org.apache.iotdb.db.exception.query.LogicalOptimizeException;
-import org.apache.iotdb.db.exception.query.QueryProcessException;
-import org.apache.iotdb.db.mpp.plan.analyze.TypeProvider;
-import org.apache.iotdb.db.mpp.plan.expression.Expression;
 import org.apache.iotdb.db.mpp.plan.expression.ExpressionType;
+import org.apache.iotdb.db.mpp.plan.expression.visitor.ExpressionVisitor;
 import org.apache.iotdb.db.mpp.plan.planner.plan.parameter.InputLocation;
-import org.apache.iotdb.db.mpp.transformation.api.LayerPointReader;
-import org.apache.iotdb.db.mpp.transformation.dag.column.ColumnTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.column.leaf.LeafColumnTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.column.leaf.TimeColumnTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.input.QueryDataSetInputLayer;
-import org.apache.iotdb.db.mpp.transformation.dag.intermediate.IntermediateLayer;
-import org.apache.iotdb.db.mpp.transformation.dag.intermediate.SingleInputColumnMultiReferenceIntermediateLayer;
-import org.apache.iotdb.db.mpp.transformation.dag.intermediate.SingleInputColumnSingleReferenceIntermediateLayer;
 import org.apache.iotdb.db.mpp.transformation.dag.memory.LayerMemoryAssigner;
-import org.apache.iotdb.db.mpp.transformation.dag.udf.UDTFContext;
-import org.apache.iotdb.db.qp.physical.crud.UDTFPlan;
-import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
-import org.apache.iotdb.tsfile.read.common.type.TypeFactory;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 public class TimestampOperand extends LeafOperand {
 
@@ -60,37 +44,8 @@ public class TimestampOperand extends LeafOperand {
   }
 
   @Override
-  public boolean isTimeSeriesGeneratingFunctionExpression() {
-    return true;
-  }
-
-  @Override
-  public void concat(List<PartialPath> prefixPaths, List<Expression> resultExpressions) {
-    resultExpressions.add(this);
-  }
-
-  @Override
-  public void removeWildcards(
-      org.apache.iotdb.db.qp.utils.WildcardsRemover wildcardsRemover,
-      List<Expression> resultExpressions)
-      throws LogicalOptimizeException {
-    resultExpressions.add(this);
-  }
-
-  @Override
-  public void collectPaths(Set<PartialPath> pathSet) {
-    pathSet.add(TIMESTAMP_PARTIAL_PATH);
-  }
-
-  @Override
-  public TSDataType inferTypes(TypeProvider typeProvider) {
-    typeProvider.setType(toString(), TSDataType.INT64);
-    return TSDataType.INT64;
-  }
-
-  @Override
-  public void bindInputLayerColumnIndexWithExpression(UDTFPlan udtfPlan) {
-    // do nothing
+  public <R, C> R accept(ExpressionVisitor<R, C> visitor, C context) {
+    return visitor.visitTimeStampOperand(this, context);
   }
 
   @Override
@@ -102,84 +57,6 @@ public class TimestampOperand extends LeafOperand {
   @Override
   public void updateStatisticsForMemoryAssigner(LayerMemoryAssigner memoryAssigner) {
     memoryAssigner.increaseExpressionReference(this);
-  }
-
-  @Override
-  public IntermediateLayer constructIntermediateLayer(
-      long queryId,
-      UDTFContext udtfContext,
-      QueryDataSetInputLayer rawTimeSeriesInputLayer,
-      Map<Expression, IntermediateLayer> expressionIntermediateLayerMap,
-      Map<Expression, TSDataType> expressionDataTypeMap,
-      LayerMemoryAssigner memoryAssigner)
-      throws QueryProcessException, IOException {
-    if (!expressionIntermediateLayerMap.containsKey(this)) {
-      float memoryBudgetInMB = memoryAssigner.assign();
-
-      LayerPointReader parentLayerPointReader = rawTimeSeriesInputLayer.constructTimePointReader();
-      expressionDataTypeMap.put(this, parentLayerPointReader.getDataType());
-
-      expressionIntermediateLayerMap.put(
-          this,
-          memoryAssigner.getReference(this) == 1
-              ? new SingleInputColumnSingleReferenceIntermediateLayer(
-                  this, queryId, memoryBudgetInMB, parentLayerPointReader)
-              : new SingleInputColumnMultiReferenceIntermediateLayer(
-                  this, queryId, memoryBudgetInMB, parentLayerPointReader));
-    }
-
-    return expressionIntermediateLayerMap.get(this);
-  }
-
-  @Override
-  public IntermediateLayer constructIntermediateLayer(
-      long queryId,
-      UDTFContext udtfContext,
-      QueryDataSetInputLayer rawTimeSeriesInputLayer,
-      Map<Expression, IntermediateLayer> expressionIntermediateLayerMap,
-      TypeProvider typeProvider,
-      LayerMemoryAssigner memoryAssigner)
-      throws QueryProcessException, IOException {
-    if (!expressionIntermediateLayerMap.containsKey(this)) {
-      float memoryBudgetInMB = memoryAssigner.assign();
-
-      LayerPointReader parentLayerPointReader = rawTimeSeriesInputLayer.constructTimePointReader();
-
-      expressionIntermediateLayerMap.put(
-          this,
-          memoryAssigner.getReference(this) == 1
-              ? new SingleInputColumnSingleReferenceIntermediateLayer(
-                  this, queryId, memoryBudgetInMB, parentLayerPointReader)
-              : new SingleInputColumnMultiReferenceIntermediateLayer(
-                  this, queryId, memoryBudgetInMB, parentLayerPointReader));
-    }
-
-    return expressionIntermediateLayerMap.get(this);
-  }
-
-  @Override
-  public ColumnTransformer constructColumnTransformer(
-      UDTFContext udtfContext,
-      TypeProvider typeProvider,
-      List<LeafColumnTransformer> leafList,
-      Map<String, List<InputLocation>> inputLocations,
-      Map<Expression, ColumnTransformer> cache,
-      Map<Expression, ColumnTransformer> hasSeen,
-      List<ColumnTransformer> commonTransformerList,
-      List<TSDataType> inputDataTypes,
-      int originSize) {
-    ColumnTransformer res =
-        cache.computeIfAbsent(
-            this,
-            e -> {
-              TimeColumnTransformer timeColumnTransformer =
-                  new TimeColumnTransformer(
-                      TypeFactory.getType(typeProvider.getType(getExpressionString())));
-              leafList.add(timeColumnTransformer);
-              return timeColumnTransformer;
-            });
-    res.addReferenceCount();
-    return res;
   }
 
   @Override

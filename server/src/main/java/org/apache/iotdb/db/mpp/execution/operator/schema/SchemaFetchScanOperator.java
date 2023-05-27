@@ -21,10 +21,10 @@ package org.apache.iotdb.db.mpp.execution.operator.schema;
 
 import org.apache.iotdb.commons.exception.MetadataException;
 import org.apache.iotdb.commons.path.PartialPath;
+import org.apache.iotdb.commons.path.PathPatternTree;
 import org.apache.iotdb.db.metadata.schemaregion.ISchemaRegion;
 import org.apache.iotdb.db.metadata.template.Template;
 import org.apache.iotdb.db.mpp.common.schematree.ClusterSchemaTree;
-import org.apache.iotdb.db.mpp.common.schematree.PathPatternTree;
 import org.apache.iotdb.db.mpp.execution.operator.OperatorContext;
 import org.apache.iotdb.db.mpp.execution.operator.source.SourceOperator;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeId;
@@ -44,6 +44,8 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 
+import static org.apache.iotdb.tsfile.read.common.block.TsBlockBuilderStatus.DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES;
+
 public class SchemaFetchScanOperator implements SourceOperator {
 
   private static final Logger logger = LoggerFactory.getLogger(SchemaFetchScanOperator.class);
@@ -54,8 +56,8 @@ public class SchemaFetchScanOperator implements SourceOperator {
   private final Map<Integer, Template> templateMap;
 
   private final ISchemaRegion schemaRegion;
+  private final boolean withTags;
 
-  private TsBlock tsBlock;
   private boolean isFinished = false;
 
   public SchemaFetchScanOperator(
@@ -63,12 +65,14 @@ public class SchemaFetchScanOperator implements SourceOperator {
       OperatorContext context,
       PathPatternTree patternTree,
       Map<Integer, Template> templateMap,
-      ISchemaRegion schemaRegion) {
+      ISchemaRegion schemaRegion,
+      boolean withTags) {
     this.sourceId = planNodeId;
     this.operatorContext = context;
     this.patternTree = patternTree;
     this.schemaRegion = schemaRegion;
     this.templateMap = templateMap;
+    this.withTags = withTags;
   }
 
   @Override
@@ -77,27 +81,26 @@ public class SchemaFetchScanOperator implements SourceOperator {
   }
 
   @Override
-  public TsBlock next() {
+  public TsBlock next() throws Exception {
     if (!hasNext()) {
       throw new NoSuchElementException();
     }
     isFinished = true;
     try {
-      fetchSchema();
+      return fetchSchema();
     } catch (MetadataException e) {
       logger.error("Error occurred during execute SchemaFetchOperator {}", sourceId, e);
       throw new RuntimeException(e);
     }
-    return tsBlock;
   }
 
   @Override
-  public boolean hasNext() {
+  public boolean hasNext() throws Exception {
     return !isFinished;
   }
 
   @Override
-  public boolean isFinished() {
+  public boolean isFinished() throws Exception {
     return isFinished;
   }
 
@@ -106,28 +109,40 @@ public class SchemaFetchScanOperator implements SourceOperator {
     return sourceId;
   }
 
-  private void fetchSchema() throws MetadataException {
+  private TsBlock fetchSchema() throws MetadataException {
     ClusterSchemaTree schemaTree = new ClusterSchemaTree();
     List<PartialPath> partialPathList = patternTree.getAllPathPatterns();
     for (PartialPath path : partialPathList) {
-      schemaTree.appendMeasurementPaths(schemaRegion.fetchSchema(path, templateMap));
+      schemaTree.appendMeasurementPaths(schemaRegion.fetchSchema(path, templateMap, withTags));
     }
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
     try {
-      // to indicate this binary data is storage group info
+      // to indicate this binary data is database info
       ReadWriteIOUtils.write((byte) 1, outputStream);
 
       schemaTree.serialize(outputStream);
     } catch (IOException e) {
       // Totally memory operation. This case won't happen.
     }
-    this.tsBlock =
-        new TsBlock(
-            new TimeColumn(1, new long[] {0}),
-            new BinaryColumn(
-                1,
-                Optional.of(new boolean[] {false}),
-                new Binary[] {new Binary(outputStream.toByteArray())}));
+    return new TsBlock(
+        new TimeColumn(1, new long[] {0}),
+        new BinaryColumn(
+            1, Optional.empty(), new Binary[] {new Binary(outputStream.toByteArray())}));
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    return DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES;
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    return DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES;
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    return 0L;
   }
 }

@@ -33,6 +33,8 @@ import static java.util.Objects.requireNonNull;
 
 public class QueryId {
 
+  public static QueryId mockQueryId = QueryId.valueOf("mock_query_id");
+
   private final String id;
 
   private int nextPlanNodeIndex;
@@ -50,7 +52,7 @@ public class QueryId {
   }
 
   public PlanNodeId genPlanNodeId() {
-    return new PlanNodeId(String.format("%d", nextPlanNodeIndex++));
+    return new PlanNodeId(String.valueOf(nextPlanNodeIndex++));
   }
 
   public PlanFragmentId genPlanFragmentId() {

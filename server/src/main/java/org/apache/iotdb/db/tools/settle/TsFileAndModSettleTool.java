@@ -67,7 +67,7 @@ public class TsFileAndModSettleTool {
     for (Map.Entry<String, Integer> entry : getInstance().recoverSettleFileMap.entrySet()) {
       String path = entry.getKey();
       TsFileResource resource = new TsFileResource(new File(path));
-      resource.setStatus(TsFileResourceStatus.CLOSED);
+      resource.setStatus(TsFileResourceStatus.NORMAL);
       oldTsFileResources.put(resource.getTsFile().getName(), resource);
     }
     List<File> tsFiles = checkArgs(args);
@@ -75,7 +75,7 @@ public class TsFileAndModSettleTool {
       if (!oldTsFileResources.containsKey(file.getName())) {
         if (new File(file + TsFileResource.RESOURCE_SUFFIX).exists()) {
           TsFileResource resource = new TsFileResource(file);
-          resource.setStatus(TsFileResourceStatus.CLOSED);
+          resource.setStatus(TsFileResourceStatus.NORMAL);
           oldTsFileResources.put(file.getName(), resource);
         }
       }
@@ -99,7 +99,7 @@ public class TsFileAndModSettleTool {
         if (arg.endsWith(TSFILE_SUFFIX)) { // it's a file
           File f = new File(arg);
           if (!f.exists()) {
-            logger.warn("Cannot find TsFile : " + arg);
+            logger.warn("Cannot find TsFile : {}", arg);
             continue;
           }
           files.add(f);
@@ -115,11 +115,11 @@ public class TsFileAndModSettleTool {
   private static List<File> getAllFilesInOneDirBySuffix(String dirPath, String suffix) {
     File dir = new File(dirPath);
     if (!dir.isDirectory()) {
-      logger.warn("It's not a directory path : " + dirPath);
+      logger.warn("It's not a directory path : {}", dirPath);
       return Collections.emptyList();
     }
     if (!dir.exists()) {
-      logger.warn("Cannot find Directory : " + dirPath);
+      logger.warn("Cannot find Directory : {}", dirPath);
       return Collections.emptyList();
     }
     List<File> tsFiles =
@@ -335,7 +335,7 @@ public class TsFileAndModSettleTool {
 
         // move .resource File
         newTsFileResource.setFile(fsFactory.getFile(oldTsFile.getParent(), newTsFile.getName()));
-        newTsFileResource.setStatus(TsFileResourceStatus.CLOSED);
+        newTsFileResource.setStatus(TsFileResourceStatus.NORMAL);
         try {
           newTsFileResource.serialize();
         } catch (IOException e) {

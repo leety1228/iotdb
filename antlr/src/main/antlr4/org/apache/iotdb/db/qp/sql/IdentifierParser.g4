@@ -23,6 +23,7 @@ options { tokenVocab=SqlLexer; }
 
 identifier
      : keyWords
+     | DURATION_LITERAL
      | ID
      | QUOTED_ID
      ;
@@ -43,16 +44,19 @@ keyWords
     | AS
     | ASC
     | ATTRIBUTES
-    | AUTOREGISTER
+    | AUTO
     | BEFORE
     | BEGIN
+    | BLOCKED
     | BOUNDARY
     | BY
     | CACHE
+    | CAST
     | CHILD
     | CLEAR
     | CLUSTER
     | CONCAT
+    | CONDITION
     | CONFIGNODES
     | CONFIGURATION
     | CONTINUOUS
@@ -62,19 +66,30 @@ keyWords
     | CQS
     | CREATE
     | DATA
+    | DATABASE
+    | DATABASES
+    | DATANODEID
     | DATANODES
+    | DEACTIVATE
     | DEBUG
     | DELETE
     | DESC
     | DESCRIBE
     | DEVICE
+    | DEVICEID
     | DEVICES
+    | DETAILS
     | DISABLE
+    | DISCARD
     | DROP
+    | ELAPSEDTIME
+    | ELSE
     | END
+    | ENDTIME
     | EVERY
     | EXPLAIN
     | FILL
+    | FILE
     | FLUSH
     | FOR
     | FROM
@@ -84,6 +99,7 @@ keyWords
     | GLOBAL
     | GRANT
     | GROUP
+    | HAVING
     | INDEX
     | INFO
     | INSERT
@@ -103,60 +119,86 @@ keyWords
     | LOCK
     | MERGE
     | METADATA
+    | MODEL
+    | MODELS
     | NODES
+    | NONE
     | NOW
     | OF
     | OFF
     | OFFSET
     | ON
     | ORDER
+    | ONSUCCESS
     | PARTITION
     | PASSWORD
     | PATHS
     | PIPE
     | PIPES
-    | PIPESERVER
     | PIPESINK
     | PIPESINKS
     | PIPESINKTYPE
+    | PIPEPLUGIN
+    | PIPEPLUGINS
+    | POLICY
     | PREVIOUS
     | PREVIOUSUNTILLAST
     | PRIVILEGES
+    | PRIVILEGE_VALUE
     | PROCESSLIST
     | PROPERTY
     | PRUNE
     | QUERIES
     | QUERY
+    | QUERYID
+    | QUOTA
+    | RANGE
     | READONLY
     | REGEXP
+    | REGIONID
     | REGIONS
     | REMOVE
     | RENAME
     | RESAMPLE
     | RESOURCE
+    | REPLACE
     | REVOKE
     | ROLE
+    | ROUND
+    | RUNNING
     | SCHEMA
     | SELECT
+    | SERIESSLOTID
+    | SESSION
     | SET
     | SETTLE
     | SGLEVEL
     | SHOW
     | SLIMIT
     | SOFFSET
+    | SPACE
     | STORAGE
     | START
+    | STARTTIME
+    | STATEFUL
+    | STATELESS
+    | STATEMENT
     | STOP
+    | SUBSTRING
     | SYSTEM
     | TAGS
     | TASK
     | TEMPLATE
-    | TEMPLATES
+    | THEN
+    | THROTTLE
+    | TIMEOUT
     | TIMESERIES
+    | TIMESLOTID
     | TO
     | TOLERANCE
     | TOP
     | TRACING
+    | TRAILS
     | TRIGGER
     | TRIGGERS
     | TTL
@@ -165,14 +207,17 @@ keyWords
     | UNSET
     | UPDATE
     | UPSERT
+    | URI
     | USER
     | USING
     | VALUES
+    | VARIATION
     | VERIFY
     | VERSION
+    | VIEW
+    | WHEN
     | WHERE
     | WITH
     | WITHOUT
     | WRITABLE
-    | PRIVILEGE_VALUE
     ;

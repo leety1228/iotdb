@@ -20,14 +20,19 @@
 package org.apache.iotdb.db.consensus.statemachine;
 
 import org.apache.iotdb.common.rpc.thrift.TSStatus;
+import org.apache.iotdb.commons.conf.CommonDescriptor;
 import org.apache.iotdb.commons.consensus.DataRegionId;
 import org.apache.iotdb.commons.path.PartialPath;
 import org.apache.iotdb.consensus.common.DataSet;
 import org.apache.iotdb.consensus.common.request.IConsensusRequest;
 import org.apache.iotdb.consensus.common.request.IndexedConsensusRequest;
-import org.apache.iotdb.consensus.multileader.wal.GetConsensusReqReaderPlan;
+import org.apache.iotdb.consensus.iot.wal.GetConsensusReqReaderPlan;
+import org.apache.iotdb.db.conf.IoTDBDescriptor;
 import org.apache.iotdb.db.consensus.statemachine.visitor.DataExecutionVisitor;
-import org.apache.iotdb.db.engine.StorageEngineV2;
+import org.apache.iotdb.db.engine.StorageEngine;
+import org.apache.iotdb.db.engine.cache.BloomFilterCache;
+import org.apache.iotdb.db.engine.cache.ChunkCache;
+import org.apache.iotdb.db.engine.cache.TimeSeriesMetadataCache;
 import org.apache.iotdb.db.engine.snapshot.SnapshotLoader;
 import org.apache.iotdb.db.engine.snapshot.SnapshotTaker;
 import org.apache.iotdb.db.engine.storagegroup.DataRegion;
@@ -46,8 +51,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 public class DataRegionStateMachine extends BaseStateMachine {
 
@@ -56,17 +64,26 @@ public class DataRegionStateMachine extends BaseStateMachine {
   private static final FragmentInstanceManager QUERY_INSTANCE_MANAGER =
       FragmentInstanceManager.getInstance();
 
-  private DataRegion region;
+  protected DataRegion region;
 
   public DataRegionStateMachine(DataRegion region) {
     this.region = region;
   }
 
   @Override
-  public void start() {}
+  public void start() {
+    // do nothing
+  }
 
   @Override
-  public void stop() {}
+  public void stop() {
+    // do nothing
+  }
+
+  @Override
+  public boolean isReadOnly() {
+    return CommonDescriptor.getInstance().getConfig().isReadOnly();
+  }
 
   @Override
   public boolean takeSnapshot(File snapshotDir) {
@@ -75,7 +92,23 @@ public class DataRegionStateMachine extends BaseStateMachine {
     } catch (Exception e) {
       logger.error(
           "Exception occurs when taking snapshot for {}-{} in {}",
-          region.getLogicalStorageGroupName(),
+          region.getDatabaseName(),
+          region.getDataRegionId(),
+          snapshotDir,
+          e);
+      return false;
+    }
+  }
+
+  @Override
+  public boolean takeSnapshot(File snapshotDir, String snapshotTmpId, String snapshotId) {
+    try {
+      return new SnapshotTaker(region)
+          .takeFullSnapshot(snapshotDir.getAbsolutePath(), snapshotTmpId, snapshotId, true);
+    } catch (Exception e) {
+      logger.error(
+          "Exception occurs when taking snapshot for {}-{} in {}",
+          region.getDatabaseName(),
           region.getDataRegionId(),
           snapshotDir,
           e);
@@ -88,7 +121,7 @@ public class DataRegionStateMachine extends BaseStateMachine {
     DataRegion newRegion =
         new SnapshotLoader(
                 latestSnapshotRootDir.getAbsolutePath(),
-                region.getLogicalStorageGroupName(),
+                region.getDatabaseName(),
                 region.getDataRegionId())
             .loadSnapshotForStateMachine();
     if (newRegion == null) {
@@ -97,35 +130,36 @@ public class DataRegionStateMachine extends BaseStateMachine {
     }
     this.region = newRegion;
     try {
-      StorageEngineV2.getInstance()
+      StorageEngine.getInstance()
           .setDataRegion(new DataRegionId(Integer.parseInt(region.getDataRegionId())), region);
+      ChunkCache.getInstance().clear();
+      TimeSeriesMetadataCache.getInstance().clear();
+      BloomFilterCache.getInstance().clear();
     } catch (Exception e) {
       logger.error("Exception occurs when replacing data region in storage engine.", e);
     }
   }
 
-  @Override
-  public TSStatus write(IConsensusRequest request) {
-    PlanNode planNode;
-    try {
-      if (request instanceof IndexedConsensusRequest) {
-        IndexedConsensusRequest indexedRequest = (IndexedConsensusRequest) request;
-        List<InsertNode> insertNodes = new ArrayList<>(indexedRequest.getRequests().size());
-        for (IConsensusRequest req : indexedRequest.getRequests()) {
-          // PlanNode in IndexedConsensusRequest should always be InsertNode
-          InsertNode innerNode = (InsertNode) getPlanNode(req);
-          innerNode.setSearchIndex(indexedRequest.getSearchIndex());
-          insertNodes.add(innerNode);
-        }
-        planNode = mergeInsertNodes(insertNodes);
+  protected PlanNode grabInsertNode(IndexedConsensusRequest indexedRequest) {
+    List<InsertNode> insertNodes = new ArrayList<>(indexedRequest.getRequests().size());
+    for (IConsensusRequest req : indexedRequest.getRequests()) {
+      // PlanNode in IndexedConsensusRequest should always be InsertNode
+      PlanNode planNode = getPlanNode(req);
+      if (planNode instanceof InsertNode) {
+        InsertNode innerNode = (InsertNode) planNode;
+        innerNode.setSearchIndex(indexedRequest.getSearchIndex());
+        insertNodes.add(innerNode);
+      } else if (indexedRequest.getRequests().size() == 1) {
+        // If the planNode is not InsertNode, it is expected that the IndexedConsensusRequest only
+        // contains one request
+        return planNode;
       } else {
-        planNode = getPlanNode(request);
+        throw new IllegalArgumentException(
+            "PlanNodes in IndexedConsensusRequest are not InsertNode and "
+                + "the size of requests are larger than 1");
       }
-      return write(planNode);
-    } catch (IllegalArgumentException e) {
-      logger.error(e.getMessage(), e);
-      return new TSStatus(TSStatusCode.INTERNAL_SERVER_ERROR.getStatusCode());
     }
+    return mergeInsertNodes(insertNodes);
   }
 
   /**
@@ -133,8 +167,10 @@ public class DataRegionStateMachine extends BaseStateMachine {
    * merged to one multi-tablet). <br>
    * Notice: the continuity of insert nodes sharing same search index should be protected by the
    * upper layer.
+   *
+   * @exception RuntimeException when insertNodes is empty
    */
-  private InsertNode mergeInsertNodes(List<InsertNode> insertNodes) {
+  protected InsertNode mergeInsertNodes(List<InsertNode> insertNodes) {
     int size = insertNodes.size();
     if (size == 0) {
       throw new RuntimeException();
@@ -144,7 +180,8 @@ public class DataRegionStateMachine extends BaseStateMachine {
     }
 
     InsertNode result;
-    if (insertNodes.get(0) instanceof InsertTabletNode) { // merge to InsertMultiTabletsNode
+    // merge to InsertMultiTabletsNode
+    if (insertNodes.get(0) instanceof InsertTabletNode) {
       List<Integer> index = new ArrayList<>(size);
       List<InsertTabletNode> insertTabletNodes = new ArrayList<>(size);
       int i = 0;
@@ -180,6 +217,34 @@ public class DataRegionStateMachine extends BaseStateMachine {
     return result;
   }
 
+  @Override
+  public List<Path> getSnapshotFiles(File latestSnapshotRootDir) {
+    try {
+      return new SnapshotLoader(
+              latestSnapshotRootDir.getAbsolutePath(),
+              region.getDatabaseName(),
+              region.getDataRegionId())
+          .getSnapshotFileInfo().stream().map(File::toPath).collect(Collectors.toList());
+    } catch (IOException e) {
+      logger.error(
+          "Meets error when getting snapshot files for {}-{}",
+          region.getDatabaseName(),
+          region.getDataRegionId(),
+          e);
+      return null;
+    }
+  }
+
+  @Override
+  public TSStatus write(IConsensusRequest request) {
+    try {
+      return write((PlanNode) request);
+    } catch (IllegalArgumentException e) {
+      logger.error(e.getMessage(), e);
+      return new TSStatus(TSStatusCode.INTERNAL_SERVER_ERROR.getStatusCode());
+    }
+  }
+
   protected TSStatus write(PlanNode planNode) {
     return planNode.accept(new DataExecutionVisitor(), region);
   }
@@ -197,6 +262,40 @@ public class DataRegionStateMachine extends BaseStateMachine {
         return null;
       }
       return QUERY_INSTANCE_MANAGER.execDataQueryFragmentInstance(fragmentInstance, region);
+    }
+  }
+
+  @Override
+  public boolean shouldRetry(TSStatus writeResult) {
+    // TODO implement this
+    return super.shouldRetry(writeResult);
+  }
+
+  @Override
+  public TSStatus updateResult(TSStatus previousResult, TSStatus retryResult) {
+    // TODO implement this
+    return super.updateResult(previousResult, retryResult);
+  }
+
+  @Override
+  public long getSleepTime() {
+    // TODO implement this
+    return super.getSleepTime();
+  }
+
+  @Override
+  public File getSnapshotRoot() {
+    String snapshotDir =
+        IoTDBDescriptor.getInstance().getConfig().getRatisDataRegionSnapshotDir()
+            + File.separator
+            + region.getDatabaseName()
+            + "-"
+            + region.getDataRegionId();
+    try {
+      return new File(snapshotDir).getCanonicalFile();
+    } catch (IOException e) {
+      logger.warn("{}: cannot get the canonical file of {} due to {}", this, snapshotDir, e);
+      return null;
     }
   }
 }

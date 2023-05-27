@@ -19,31 +19,18 @@
 
 package org.apache.iotdb.db.mpp.transformation.dag.input;
 
-import org.apache.iotdb.commons.path.PartialPath;
 import org.apache.iotdb.db.exception.query.QueryProcessException;
 import org.apache.iotdb.db.mpp.transformation.api.LayerPointReader;
 import org.apache.iotdb.db.mpp.transformation.api.YieldableState;
 import org.apache.iotdb.db.mpp.transformation.dag.memory.SafetyLine;
 import org.apache.iotdb.db.mpp.transformation.dag.memory.SafetyLine.SafetyPile;
 import org.apache.iotdb.db.mpp.transformation.datastructure.row.ElasticSerializableRowRecordList;
-import org.apache.iotdb.db.qp.physical.crud.UDTFPlan;
-import org.apache.iotdb.db.query.dataset.RawQueryDataSetWithValueFilter;
-import org.apache.iotdb.db.query.dataset.UDFRawQueryInputDataSetWithoutValueFilter;
-import org.apache.iotdb.db.query.reader.series.IReaderByTimestamp;
-import org.apache.iotdb.db.query.reader.series.ManagedSeriesReader;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
-import org.apache.iotdb.tsfile.read.query.timegenerator.TimeGenerator;
 import org.apache.iotdb.tsfile.utils.Binary;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
-import java.util.List;
 
 public class QueryDataSetInputLayer {
-
-  private static final Logger LOGGER = LoggerFactory.getLogger(QueryDataSetInputLayer.class);
 
   private IUDFInputDataSet queryDataSet;
   private TSDataType[] dataTypes;
@@ -52,40 +39,13 @@ public class QueryDataSetInputLayer {
   private ElasticSerializableRowRecordList rowRecordList;
   private SafetyLine safetyLine;
 
-  /** InputLayerWithoutValueFilter */
   public QueryDataSetInputLayer(
-      long queryId, float memoryBudgetInMB, UDTFPlan queryPlan, List<ManagedSeriesReader> readers)
-      throws QueryProcessException, IOException, InterruptedException {
-    construct(
-        queryId,
-        memoryBudgetInMB,
-        new UDFRawQueryInputDataSetWithoutValueFilter(queryId, queryPlan, readers));
-  }
-
-  /** InputLayerWithValueFilter */
-  public QueryDataSetInputLayer(
-      long queryId,
-      float memoryBudgetInMB,
-      List<PartialPath> paths,
-      List<TSDataType> dataTypes,
-      TimeGenerator timeGenerator,
-      List<IReaderByTimestamp> readers,
-      List<List<Integer>> readerToIndexList,
-      List<Boolean> cached)
-      throws QueryProcessException {
-    construct(
-        queryId,
-        memoryBudgetInMB,
-        new RawQueryDataSetWithValueFilter(
-            paths, dataTypes, timeGenerator, readers, readerToIndexList, cached, true));
-  }
-
-  public QueryDataSetInputLayer(long queryId, float memoryBudgetInMB, IUDFInputDataSet queryDataSet)
+      String queryId, float memoryBudgetInMB, IUDFInputDataSet queryDataSet)
       throws QueryProcessException {
     construct(queryId, memoryBudgetInMB, queryDataSet);
   }
 
-  private void construct(long queryId, float memoryBudgetInMB, IUDFInputDataSet queryDataSet)
+  private void construct(String queryId, float memoryBudgetInMB, IUDFInputDataSet queryDataSet)
       throws QueryProcessException {
     this.queryDataSet = queryDataSet;
     dataTypes = queryDataSet.getDataTypes().toArray(new TSDataType[0]);
@@ -154,7 +114,7 @@ public class QueryDataSetInputLayer {
     }
 
     @Override
-    public YieldableState yield() throws IOException, QueryProcessException {
+    public YieldableState yield() throws Exception {
       if (hasCachedRowRecord) {
         return YieldableState.YIELDABLE;
       }
@@ -272,7 +232,7 @@ public class QueryDataSetInputLayer {
   private class TimePointReader extends AbstractLayerPointReader {
 
     @Override
-    public YieldableState yield() throws IOException, QueryProcessException {
+    public YieldableState yield() throws Exception {
       if (hasCachedRowRecord) {
         return YieldableState.YIELDABLE;
       }

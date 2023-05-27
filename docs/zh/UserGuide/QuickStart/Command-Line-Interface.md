@@ -25,24 +25,26 @@ IOTDB 为用户提供 cli/Shell 工具用于启动客户端和服务端程序。
 > \$IOTDB\_HOME 表示 IoTDB 的安装目录所在路径。
 
 ## 安装
-在 iotdb 的根目录下执行
+如果使用源码版，可以在 iotdb 的根目录下执行
 
 ```shell
 > mvn clean package -pl cli -am -DskipTests
 ```
 
-在生成完毕之后，IoTDB 的 cli 工具位于文件夹"cli/target/iotdb-cli-{project.version}"中。
+在生成完毕之后，IoTDB 的 Cli 工具位于文件夹"cli/target/iotdb-cli-{project.version}"中。
+
+如果你下载的是二进制版，那么 Cli 可以在 sbin 文件夹下直接找到。
 
 ## 运行
 
 ### Cli 运行方式
-安装后的 IoTDB 中有一个默认用户：`root`，默认密码为`root`。用户可以使用该用户尝试运行 IoTDB 客户端以测试服务器是否正常启动。客户端启动脚本为$IOTDB_HOME/sbin 文件夹下的`start-cli`脚本。启动脚本时需要指定运行 IP 和 RPC PORT。以下为服务器在本机启动，且用户未更改运行端口号的示例，默认端口为 6667。若用户尝试连接远程服务器或更改了服务器运行的端口号，请在-h 和-p 项处使用服务器的 IP 和 RPC PORT。</br>
+安装后的 IoTDB 中有一个默认用户：`root`，默认密码为`root`。用户可以使用该用户尝试运行 IoTDB 客户端以测试服务器是否正常启动。客户端启动脚本为$IOTDB_HOME/sbin 文件夹下的`start-cli`脚本。启动脚本时需要指定运行 IP 和 RPC PORT。以下为服务器在本机启动，且用户未更改运行端口号的示例，默认端口为 6667。若用户尝试连接远程服务器或更改了服务器运行的端口号，请在-h 和-p 项处使用服务器的 IP 和 RPC PORT。<br>
 用户也可以在启动脚本的最前方设置自己的环境变量，如 JAVA_HOME 等 （对于 linux 用户，脚本路径为："/sbin/start-cli.sh"； 对于 windows 用户，脚本路径为："/sbin/start-cli.bat")
 
 Linux 系统与 MacOS 系统启动命令如下：
 
 ```shell
-Shell > sbin/start-cli.sh -h 127.0.0.1 -p 6667 -u root -pw root
+Shell > bash sbin/start-cli.sh -h 127.0.0.1 -p 6667 -u root -pw root
 ```
 Windows 系统启动命令如下：
 
@@ -59,7 +61,7 @@ Shell > sbin\start-cli.bat -h 127.0.0.1 -p 6667 -u root -pw root
  _| |_| \__. | _| |_    _| |_.' /_| |__) |
 |_____|'.__.' |_____|  |______.'|_______/  version <version>
 
-IoTDB> login successfully
+Successfully login at 127.0.0.1:6667
 ```
 输入`quit`或`exit`可退出 cli 结束本次会话，cli 输出`quit normally`表示退出成功。
 
@@ -74,7 +76,7 @@ IoTDB> login successfully
 |-pw <`password`>|string 类型，不需要引号|否|IoTDB 连接服务器所使用的密码。如果没有输入密码 IoTDB 会在 Cli 端提示输入密码。|-pw root|
 |-u <`username`>|string 类型，不需要引号|是|IoTDB 连接服务器锁使用的用户名。|-u root|
 |-maxPRC <`maxPrintRowCount`>|int 类型|否|设置 IoTDB 返回客户端命令行中所显示的最大行数。|-maxPRC 10|
-|-e <`execute`> |string 类型|否|在不进入客户端输入模式的情况下，批量操作 IoTDB|-e "show storage group"|
+|-e <`execute`> |string 类型|否|在不进入客户端输入模式的情况下，批量操作 IoTDB|-e "show databases"|
 |-c | 空 | 否 | 如果服务器设置了 `rpc_thrift_compression_enable=true`, 则 CLI 必须使用 `-c` | -c |
 
 下面展示一条客户端命令，功能是连接 IP 为 10.129.187.21 的主机，端口为 6667 ，用户名为 root，密码为 root，以数字的形式打印时间戳，IoTDB 命令行显示的最大行数为 10。
@@ -82,7 +84,7 @@ IoTDB> login successfully
 Linux 系统与 MacOS 系统启动命令如下：
 
 ```shell
-Shell > sbin/start-cli.sh -h 10.129.187.21 -p 6667 -u root -pw root -disableISO8601 -maxPRC 10
+Shell > bash sbin/start-cli.sh -h 10.129.187.21 -p 6667 -u root -pw root -disableISO8601 -maxPRC 10
 ```
 Windows 系统启动命令如下：
 
@@ -90,74 +92,87 @@ Windows 系统启动命令如下：
 Shell > sbin\start-cli.bat -h 10.129.187.21 -p 6667 -u root -pw root -disableISO8601 -maxPRC 10
 ```
 
+### CLI 特殊命令
+下面列举了一些CLI的特殊命令。
+
+| 命令 | 描述 / 例子 |
+|:---|:---|
+| `set time_display_type=xxx` | 例如： long, default, ISO8601, yyyy-MM-dd HH:mm:ss |
+| `show time_display_type` | 显示时间显示方式 |
+| `set time_zone=xxx` | 例如： +08:00, Asia/Shanghai |
+| `show time_zone` | 显示CLI的时区 |
+| `set fetch_size=xxx` | 设置从服务器查询数据时的读取条数 |
+| `show fetch_size` |  显示读取条数的大小 |
+| `set max_display_num=xxx` | 设置 CLI 一次展示的最大数据条数， 设置为-1表示无限制 |
+| `help` | 获取CLI特殊命令的提示 |
+| `exit/quit` | 退出CLI |
+
 ### 使用 OpenID 作为用户名认证登录
 
 OpenID Connect (OIDC) 使用 keycloack 作为 OIDC 服务权限认证服务。
 
 #### 配置
-配置位于 iotdb-engines.properties，设定 authorizer_provider_class 为 org.apache.iotdb.db.auth.authorizer.OpenIdAuthorizer 则开启了 openID 服务，默认情况下值为 org.apache.iotdb.db.auth.authorizer.LocalFileAuthorizer 表示没有开启 openID 服务。
+配置位于 iotdb-common.properties，设定 authorizer_provider_class 为 org.apache.iotdb.commons.auth.authorizer.OpenIdAuthorizer 则开启了 openID 服务，默认情况下值为 org.apache.iotdb.commons.auth.authorizer.LocalFileAuthorizer 表示没有开启 openID 服务。
 
 ```
-authorizer_provider_class=org.apache.iotdb.db.auth.authorizer.OpenIdAuthorizer
+authorizer_provider_class=org.apache.iotdb.commons.auth.authorizer.OpenIdAuthorizer
 ```
-如果开启了 openID 服务则 openID_url 为必填项，openID_url 值为 http://ip:port/auth/realms/{realmsName}
+如果开启了 openID 服务则 openID_url 为必填项，openID_url 值为 http://ip:port/realms/{realmsName}
 
 ```
-openID_url=http://127.0.0.1:8080/auth/realms/iotdb/
+openID_url=http://127.0.0.1:8080/realms/iotdb/
 ```
 ####keycloack 配置
 
-1、下载 keycloack 程序，在 keycloack/bin 中启动 keycloack
+1、下载 keycloack 程序（此教程为21.1.0版本），在 keycloack/bin 中启动 keycloack
 
 ```shell
-Shell >cd bin
-Shell >./standalone.sh
+Shell > cd bin
+Shell > ./kc.sh start-dev
 ```
-2、使用 https://ip:port/auth 登陆 keycloack, 首次登陆需要创建用户
+2、使用 https://ip:port 登陆 keycloack, 首次登陆需要创建用户
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/login_keycloak.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/login_keycloak.png?raw=true)
 
 3、点击 Administration Console 进入管理端
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/Administration%20Console.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/AdministrationConsole.png?raw=true)
 
-4、在左侧的 Master 菜单点击 add Realm, 输入 Name 创建一个新的 Realm
+4、在左侧的 Master 菜单点击 Create Realm, 输入 Realm Name 创建一个新的 Realm
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/add%20Realm_1.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/add_Realm_1.jpg?raw=true)
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/add%20Realm_2.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/add_Realm_2.jpg?raw=true)
 
 5、点击左侧菜单 Clients，创建 client
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/client.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/client.jpg?raw=true)
 
 6、点击左侧菜单 User，创建 user
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/user.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/user.jpg?raw=true)
 
 7、点击新创建的用户 id，点击 Credentials 导航输入密码和关闭 Temporary 选项，至此 keyclork 配置完成
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/pwd.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/pwd.jpg?raw=true)
 
-8、创建角色，点击左侧菜单的 Roles然后点击Add Role 按钮添加角色
+8、创建角色，点击左侧菜单的 Roles然后点击Create Role 按钮添加角色
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/add_role1.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/add_role1.jpg?raw=true)
 
-9、在Role Name 中输入`iotdb_admin`，点击save 按钮。提示：这里的`iotdb_admin`不能为其他名称否则即使登陆成功后也将无权限使用iotdb的查询、插入、创建存储组、添加用户、角色等功能
+9、在Role Name 中输入`iotdb_admin`，点击save 按钮。提示：这里的`iotdb_admin`不能为其他名称否则即使登陆成功后也将无权限使用iotdb的查询、插入、创建 database、添加用户、角色等功能
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/add_role2.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/add_role2.jpg?raw=true)
 
-10、点击左侧的User 菜单然后点击用户列表中的Edit的按钮为该用户添加我们刚创建的`iotdb_admin`角色
+10、点击左侧的User 菜单然后点击用户列表中的用户为该用户添加我们刚创建的`iotdb_admin`角色
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/add_role3.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/add_role3.jpg?raw=true)
 
-11、选择Role Mappings ，在Available Role选择`iotdb_admin`角色然后点Add selected 按钮添加角色
+11、选择Role Mappings ，在Assign role选择`iotdb_admin`增加角色
 
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/add_role4.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/add_role4.jpg?raw=true)
 
-12、如果`iotdb_admin`角色在Assigned Roles中并且出现`Success Role mappings updated`提示，证明角色添加成功
-
-![avatar](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/CLI/Command-Line-Interface/add_role5.png?raw=true)
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/add_role5.jpg?raw=true)
 
 提示：如果用户角色有调整需要重新生成token并且重新登陆iotdb才会生效
 
@@ -168,16 +183,18 @@ Shell >./standalone.sh
 此时，登录命令如下：
 
 ```shell
-Shell > sbin/start-cli.sh -h 10.129.187.21 -p 6667 -u {my-access-token} -pw ""
+Shell > bash sbin/start-cli.sh -h 10.129.187.21 -p 6667 -u {my-access-token} -pw ""
 ```
 
-其中，需要将{my-access-token} （注意，包括{}）替换成你的 token，即 access_token 对应的值。
+其中，需要将{my-access-token} （注意，包括{}）替换成你的 token，即 access_token 对应的值。密码为空需要再次确认。
+
+![avatar](https://alioss.timecho.com/docs/img/UserGuide/CLI/Command-Line-Interface/iotdbpw.jpeg?raw=true)
 
 如何获取 token 取决于你的 OIDC 设置。 最简单的一种情况是使用`password-grant`。例如，假设你在用 keycloack 作为你的 OIDC 服务，
 并且你在 keycloack 中有一个被定义成 public 的`iotdb`客户的 realm，那么你可以使用如下`curl`命令获得 token。
 （注意例子中的{}和里面的内容需要替换成具体的服务器地址和 realm 名字）：
 ```shell
-curl -X POST "http://{your-keycloack-server}/auth/realms/{your-realm}/protocol/openid-connect/token" \ -H "Content-Type: application/x-www-form-urlencoded" \
+curl -X POST "http://{your-keycloack-server}/realms/{your-realm}/protocol/openid-connect/token" \ -H "Content-Type: application/x-www-form-urlencoded" \
  -d "username={username}" \
  -d "password={password}" \
  -d 'grant_type=password' \
@@ -200,7 +217,7 @@ curl -X POST "http://{your-keycloack-server}/auth/realms/{your-realm}/protocol/o
 Linux 系统与 MacOS 指令：
 
 ```shell
-Shell > sbin/start-cli.sh -h {host} -p {rpcPort} -u {user} -pw {password} -e {sql for iotdb}
+Shell > bash sbin/start-cli.sh -h {host} -p {rpcPort} -u {user} -pw {password} -e {sql for iotdb}
 ```
 
 Windows 系统指令
@@ -214,7 +231,7 @@ Shell > sbin\start-cli.bat -h {host} -p {rpcPort} -u {user} -pw {password} -e {s
 
 假设用户希望对一个新启动的 IoTDB 进行如下操作：
 
-1. 创建名为 root.demo 的存储组
+1. 创建名为 root.demo 的 database
 
 2. 创建名为 root.demo.s1 的时间序列
 
@@ -232,18 +249,18 @@ rpcPort=6667
 user=root
 pass=root
 
-./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "set storage group to root.demo"
-./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "create timeseries root.demo.s1 WITH DATATYPE=INT32, ENCODING=RLE"
-./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "insert into root.demo(timestamp,s1) values(1,10)"
-./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "insert into root.demo(timestamp,s1) values(2,11)"
-./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "insert into root.demo(timestamp,s1) values(3,12)"
-./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "select s1 from root.demo"
+bash ./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "CREATE DATABASE root.demo"
+bash ./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "create timeseries root.demo.s1 WITH DATATYPE=INT32, ENCODING=RLE"
+bash ./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "insert into root.demo(timestamp,s1) values(1,10)"
+bash ./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "insert into root.demo(timestamp,s1) values(2,11)"
+bash ./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "insert into root.demo(timestamp,s1) values(3,12)"
+bash ./sbin/start-cli.sh -h ${host} -p ${rpcPort} -u ${user} -pw ${pass} -e "select s1 from root.demo"
 ```
 
 打印出来的结果显示如下，通过这种方式进行的操作与客户端的输入模式以及通过 JDBC 进行操作结果是一致的。
 
 ```shell
- Shell > ./shell.sh 
+ Shell > bash ./shell.sh 
 +-----------------------------+------------+
 |                         Time|root.demo.s1|
 +-----------------------------+------------+

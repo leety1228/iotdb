@@ -20,8 +20,8 @@
 package org.apache.iotdb.db.mpp.aggregation;
 
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
-import org.apache.iotdb.tsfile.read.common.TimeRange;
 import org.apache.iotdb.tsfile.read.common.block.column.Column;
+import org.apache.iotdb.tsfile.utils.BitMap;
 
 public class LastValueDescAccumulator extends LastValueAccumulator {
 
@@ -39,87 +39,87 @@ public class LastValueDescAccumulator extends LastValueAccumulator {
     super.reset();
   }
 
-  protected int addIntInput(Column[] column, TimeRange timeRange) {
-    for (int i = 0; i < column[0].getPositionCount(); i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > timeRange.getMax() || curTime < timeRange.getMin()) {
-        return i;
+  @Override
+  protected void addIntInput(Column[] column, BitMap needSkip, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      // skip null value in control column
+      if (needSkip != null && needSkip.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateIntLastValue(column[1].getInt(i), curTime);
-        return i;
+        updateIntLastValue(column[1].getInt(i), column[0].getLong(i));
+        return;
       }
     }
-    return column[0].getPositionCount();
   }
 
-  protected int addLongInput(Column[] column, TimeRange timeRange) {
-    for (int i = 0; i < column[0].getPositionCount(); i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > timeRange.getMax() || curTime < timeRange.getMin()) {
-        return i;
+  @Override
+  protected void addLongInput(Column[] column, BitMap needSkip, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      // skip null value in control column
+      if (needSkip != null && needSkip.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateLongLastValue(column[1].getLong(i), curTime);
-        return i;
+        updateLongLastValue(column[1].getLong(i), column[0].getLong(i));
+        return;
       }
     }
-    return column[0].getPositionCount();
   }
 
-  protected int addFloatInput(Column[] column, TimeRange timeRange) {
-    for (int i = 0; i < column[0].getPositionCount(); i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > timeRange.getMax() || curTime < timeRange.getMin()) {
-        return i;
+  @Override
+  protected void addFloatInput(Column[] column, BitMap needSkip, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      // skip null value in control column
+      if (needSkip != null && needSkip.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateFloatLastValue(column[1].getFloat(i), curTime);
-        return i;
+        updateFloatLastValue(column[1].getFloat(i), column[0].getLong(i));
+        return;
       }
     }
-    return column[0].getPositionCount();
   }
 
-  protected int addDoubleInput(Column[] column, TimeRange timeRange) {
-    for (int i = 0; i < column[0].getPositionCount(); i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > timeRange.getMax() || curTime < timeRange.getMin()) {
-        return i;
+  @Override
+  protected void addDoubleInput(Column[] column, BitMap needSkip, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      // skip null value in control column
+      if (needSkip != null && needSkip.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateDoubleLastValue(column[1].getDouble(i), curTime);
-        return i;
+        updateDoubleLastValue(column[1].getDouble(i), column[0].getLong(i));
+        return;
       }
     }
-    return column[0].getPositionCount();
   }
 
-  protected int addBooleanInput(Column[] column, TimeRange timeRange) {
-    for (int i = 0; i < column[0].getPositionCount(); i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > timeRange.getMax() || curTime < timeRange.getMin()) {
-        return i;
+  @Override
+  protected void addBooleanInput(Column[] column, BitMap needSkip, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      // skip null value in control column
+      if (needSkip != null && needSkip.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateBooleanLastValue(column[1].getBoolean(i), curTime);
-        return i;
+        updateBooleanLastValue(column[1].getBoolean(i), column[0].getLong(i));
+        return;
       }
     }
-    return column[0].getPositionCount();
   }
 
-  protected int addBinaryInput(Column[] column, TimeRange timeRange) {
-    for (int i = 0; i < column[0].getPositionCount(); i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > timeRange.getMax() || curTime < timeRange.getMin()) {
-        return i;
+  @Override
+  protected void addBinaryInput(Column[] column, BitMap needSkip, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      // skip null value in control column
+      if (needSkip != null && needSkip.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateBinaryLastValue(column[1].getBinary(i), curTime);
-        return i;
+        updateBinaryLastValue(column[1].getBinary(i), column[0].getLong(i));
+        return;
       }
     }
-    return column[0].getPositionCount();
   }
 }

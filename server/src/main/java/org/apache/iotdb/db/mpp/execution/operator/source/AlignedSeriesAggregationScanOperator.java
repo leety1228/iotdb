@@ -19,14 +19,15 @@
 
 package org.apache.iotdb.db.mpp.execution.operator.source;
 
-import org.apache.iotdb.db.metadata.path.AlignedPath;
+import org.apache.iotdb.commons.path.AlignedPath;
 import org.apache.iotdb.db.mpp.aggregation.Aggregator;
+import org.apache.iotdb.db.mpp.aggregation.timerangeiterator.ITimeRangeIterator;
 import org.apache.iotdb.db.mpp.execution.operator.OperatorContext;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeId;
 import org.apache.iotdb.db.mpp.plan.planner.plan.parameter.GroupByTimeParameter;
-import org.apache.iotdb.tsfile.read.filter.basic.Filter;
+import org.apache.iotdb.db.mpp.plan.planner.plan.parameter.SeriesScanOptions;
+import org.apache.iotdb.db.mpp.plan.statement.component.Ordering;
 
-import java.util.HashSet;
 import java.util.List;
 
 /** This operator is responsible to do the aggregation calculation especially for aligned series. */
@@ -35,24 +36,22 @@ public class AlignedSeriesAggregationScanOperator extends AbstractSeriesAggregat
   public AlignedSeriesAggregationScanOperator(
       PlanNodeId sourceId,
       AlignedPath seriesPath,
+      Ordering scanOrder,
+      SeriesScanOptions scanOptions,
       OperatorContext context,
       List<Aggregator> aggregators,
-      Filter timeFilter,
-      boolean ascending,
-      GroupByTimeParameter groupByTimeParameter) {
+      ITimeRangeIterator timeRangeIterator,
+      GroupByTimeParameter groupByTimeParameter,
+      long maxReturnSize) {
     super(
         sourceId,
         context,
-        new AlignedSeriesScanUtil(
-            seriesPath,
-            new HashSet<>(seriesPath.getMeasurementList()),
-            context.getInstanceContext(),
-            timeFilter,
-            null,
-            ascending),
+        new AlignedSeriesScanUtil(seriesPath, scanOrder, scanOptions, context.getInstanceContext()),
         seriesPath.getMeasurementList().size(),
         aggregators,
-        ascending,
-        groupByTimeParameter);
+        timeRangeIterator,
+        scanOrder.isAscending(),
+        groupByTimeParameter,
+        maxReturnSize);
   }
 }

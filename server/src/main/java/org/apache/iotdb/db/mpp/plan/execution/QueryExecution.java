@@ -21,23 +21,30 @@ package org.apache.iotdb.db.mpp.plan.execution;
 import org.apache.iotdb.common.rpc.thrift.TEndPoint;
 import org.apache.iotdb.common.rpc.thrift.TSStatus;
 import org.apache.iotdb.commons.client.IClientManager;
+import org.apache.iotdb.commons.client.async.AsyncDataNodeInternalServiceClient;
 import org.apache.iotdb.commons.client.sync.SyncDataNodeInternalServiceClient;
+import org.apache.iotdb.commons.conf.IoTDBConstant;
 import org.apache.iotdb.commons.exception.IoTDBException;
-import org.apache.iotdb.commons.utils.StatusUtils;
+import org.apache.iotdb.commons.service.metric.PerformanceOverviewMetrics;
 import org.apache.iotdb.db.conf.IoTDBConfig;
 import org.apache.iotdb.db.conf.IoTDBDescriptor;
+import org.apache.iotdb.db.exception.query.KilledByOthersException;
 import org.apache.iotdb.db.exception.query.QueryTimeoutRuntimeException;
+import org.apache.iotdb.db.mpp.common.FragmentInstanceId;
 import org.apache.iotdb.db.mpp.common.MPPQueryContext;
 import org.apache.iotdb.db.mpp.common.header.DatasetHeader;
 import org.apache.iotdb.db.mpp.execution.QueryState;
 import org.apache.iotdb.db.mpp.execution.QueryStateMachine;
-import org.apache.iotdb.db.mpp.execution.exchange.ISourceHandle;
 import org.apache.iotdb.db.mpp.execution.exchange.MPPDataExchangeService;
+import org.apache.iotdb.db.mpp.execution.exchange.source.ISourceHandle;
+import org.apache.iotdb.db.mpp.execution.exchange.source.SourceHandle;
+import org.apache.iotdb.db.mpp.metric.QueryExecutionMetricSet;
+import org.apache.iotdb.db.mpp.metric.QueryPlanCostMetricSet;
 import org.apache.iotdb.db.mpp.plan.analyze.Analysis;
 import org.apache.iotdb.db.mpp.plan.analyze.Analyzer;
 import org.apache.iotdb.db.mpp.plan.analyze.IPartitionFetcher;
-import org.apache.iotdb.db.mpp.plan.analyze.ISchemaFetcher;
 import org.apache.iotdb.db.mpp.plan.analyze.QueryType;
+import org.apache.iotdb.db.mpp.plan.analyze.schema.ISchemaFetcher;
 import org.apache.iotdb.db.mpp.plan.execution.memory.MemorySourceHandle;
 import org.apache.iotdb.db.mpp.plan.execution.memory.StatementMemorySource;
 import org.apache.iotdb.db.mpp.plan.execution.memory.StatementMemorySourceContext;
@@ -51,33 +58,38 @@ import org.apache.iotdb.db.mpp.plan.planner.plan.LogicalQueryPlan;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeUtil;
 import org.apache.iotdb.db.mpp.plan.scheduler.ClusterScheduler;
 import org.apache.iotdb.db.mpp.plan.scheduler.IScheduler;
-import org.apache.iotdb.db.mpp.plan.scheduler.StandaloneScheduler;
+import org.apache.iotdb.db.mpp.plan.scheduler.load.LoadTsFileScheduler;
 import org.apache.iotdb.db.mpp.plan.statement.Statement;
 import org.apache.iotdb.db.mpp.plan.statement.crud.InsertBaseStatement;
 import org.apache.iotdb.db.mpp.plan.statement.crud.InsertMultiTabletsStatement;
 import org.apache.iotdb.db.mpp.plan.statement.crud.InsertRowsStatement;
+import org.apache.iotdb.db.mpp.plan.statement.crud.LoadTsFileStatement;
+import org.apache.iotdb.db.utils.SetThreadName;
+import org.apache.iotdb.mpp.rpc.thrift.TFragmentInstanceId;
 import org.apache.iotdb.rpc.RpcUtils;
 import org.apache.iotdb.rpc.TSStatusCode;
 import org.apache.iotdb.tsfile.read.common.block.TsBlock;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
-import io.airlift.concurrent.SetThreadName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfUnchecked;
-import static org.apache.iotdb.db.mpp.plan.constant.DataNodeEndPoints.isSameNode;
+import static org.apache.iotdb.db.mpp.common.DataNodeEndPoints.isSameNode;
+import static org.apache.iotdb.db.mpp.metric.QueryExecutionMetricSet.WAIT_FOR_RESULT;
+import static org.apache.iotdb.db.mpp.metric.QueryPlanCostMetricSet.DISTRIBUTION_PLANNER;
 
 /**
  * QueryExecution stores all the status of a query which is being prepared or running inside the MPP
@@ -98,7 +110,7 @@ public class QueryExecution implements IQueryExecution {
 
   private final List<PlanOptimizer> planOptimizers;
 
-  private Statement rawStatement;
+  private final Statement rawStatement;
   private Analysis analysis;
   private LogicalQueryPlan logicalPlan;
   private DistributedQueryPlan distributedPlan;
@@ -115,8 +127,26 @@ public class QueryExecution implements IQueryExecution {
   // We use this SourceHandle to fetch the TsBlock from it.
   private ISourceHandle resultHandle;
 
+  // used for cleaning resultHandle up exactly once
+  private final AtomicBoolean resultHandleCleanUp;
+
   private final IClientManager<TEndPoint, SyncDataNodeInternalServiceClient>
-      internalServiceClientManager;
+      syncInternalServiceClientManager;
+
+  private final IClientManager<TEndPoint, AsyncDataNodeInternalServiceClient>
+      asyncInternalServiceClientManager;
+
+  private final AtomicBoolean stopped;
+
+  // cost time in ns
+  private long totalExecutionTime = 0;
+
+  private static final QueryExecutionMetricSet QUERY_EXECUTION_METRIC_SET =
+      QueryExecutionMetricSet.getInstance();
+  private static final QueryPlanCostMetricSet QUERY_PLAN_COST_METRIC_SET =
+      QueryPlanCostMetricSet.getInstance();
+  private static final PerformanceOverviewMetrics PERFORMANCE_OVERVIEW_METRICS =
+      PerformanceOverviewMetrics.getInstance();
 
   public QueryExecution(
       Statement statement,
@@ -126,7 +156,9 @@ public class QueryExecution implements IQueryExecution {
       ScheduledExecutorService scheduledExecutor,
       IPartitionFetcher partitionFetcher,
       ISchemaFetcher schemaFetcher,
-      IClientManager<TEndPoint, SyncDataNodeInternalServiceClient> internalServiceClientManager) {
+      IClientManager<TEndPoint, SyncDataNodeInternalServiceClient> syncInternalServiceClientManager,
+      IClientManager<TEndPoint, AsyncDataNodeInternalServiceClient>
+          asyncInternalServiceClientManager) {
     this.rawStatement = statement;
     this.executor = executor;
     this.writeOperationExecutor = writeOperationExecutor;
@@ -137,79 +169,118 @@ public class QueryExecution implements IQueryExecution {
     this.stateMachine = new QueryStateMachine(context.getQueryId(), executor);
     this.partitionFetcher = partitionFetcher;
     this.schemaFetcher = schemaFetcher;
-    this.internalServiceClientManager = internalServiceClientManager;
+    this.syncInternalServiceClientManager = syncInternalServiceClientManager;
+    this.asyncInternalServiceClientManager = asyncInternalServiceClientManager;
 
     // We add the abort logic inside the QueryExecution.
     // So that the other components can only focus on the state change.
     stateMachine.addStateChangeListener(
         state -> {
           try (SetThreadName queryName = new SetThreadName(context.getQueryId().getId())) {
-            if (state == QueryState.RETRYING) {
-              retry();
-              return;
-            }
             if (!state.isDone()) {
               return;
             }
-            this.stop();
             // TODO: (xingtanzjr) If the query is in abnormal state, the releaseResource() should be
             // invoked
             if (state == QueryState.FAILED
                 || state == QueryState.ABORTED
                 || state == QueryState.CANCELED) {
-              logger.info("release resource because Query State is: {}", state);
-              releaseResource();
+              logger.debug("[ReleaseQueryResource] state is: {}", state);
+              Throwable cause = stateMachine.getFailureException();
+              releaseResource(cause);
             }
+            this.stop(null);
           }
         });
+    this.stopped = new AtomicBoolean(false);
+    this.resultHandleCleanUp = new AtomicBoolean(false);
+  }
+
+  @FunctionalInterface
+  interface ISourceHandleSupplier<T> {
+    T get() throws IoTDBException;
   }
 
   public void start() {
+    final long startTime = System.nanoTime();
     if (skipExecute()) {
-      logger.info("execution of query will be skipped. Transit to RUNNING immediately.");
-      constructResultForMemorySource();
-      stateMachine.transitionToRunning();
+      logger.debug("[SkipExecute]");
+      if (context.getQueryType() == QueryType.WRITE && analysis.isFailed()) {
+        stateMachine.transitionToFailed(analysis.getFailStatus());
+      } else {
+        constructResultForMemorySource();
+        stateMachine.transitionToRunning();
+      }
       return;
     }
-    long remainTime = context.getTimeOut() - (System.currentTimeMillis() - context.getStartTime());
-    if (remainTime <= 0) {
-      throw new QueryTimeoutRuntimeException();
-    }
-    context.setTimeOut(remainTime);
 
+    // check timeout for query first
+    checkTimeOutForQuery();
     doLogicalPlan();
     doDistributedPlan();
+    // update timeout after finishing plan stage
+    context.setTimeOut(
+        context.getTimeOut() - (System.currentTimeMillis() - context.getStartTime()));
+
+    stateMachine.transitionToPlanned();
     if (context.getQueryType() == QueryType.READ) {
       initResultHandle();
     }
+    PERFORMANCE_OVERVIEW_METRICS.recordPlanCost(System.nanoTime() - startTime);
     schedule();
+
+    // set partial insert error message
+    // When some columns in one insert failed, other column will continue executing insertion.
+    // The error message should be return to client, therefore we need to set it after the insertion
+    // of other column finished.
+    if (context.getQueryType() == QueryType.WRITE && analysis.isFailed()) {
+      stateMachine.transitionToFailed(analysis.getFailStatus());
+    }
   }
 
-  private void retry() {
+  private void checkTimeOutForQuery() {
+    // only check query operation's timeout because we will never limit write operation's execution
+    // time
+    if (isQuery()) {
+      long currentTime = System.currentTimeMillis();
+      if (currentTime >= context.getTimeOut() + context.getStartTime()) {
+        throw new QueryTimeoutRuntimeException(
+            context.getStartTime(), currentTime, context.getTimeOut());
+      }
+    }
+  }
+
+  private ExecutionResult retry() {
     if (retryCount >= MAX_RETRY_COUNT) {
-      logger.error("reach max retry count. transit query to failed");
+      logger.warn("[ReachMaxRetryCount]");
       stateMachine.transitionToFailed();
-      return;
+      return getStatus();
     }
     logger.warn("error when executing query. {}", stateMachine.getFailureMessage());
     // stop and clean up resources the QueryExecution used
-    this.stopAndCleanup();
-    logger.info("wait {}ms before retry...", RETRY_INTERVAL_IN_MS);
+    this.stopAndCleanup(stateMachine.getFailureException());
+    logger.info("[WaitBeforeRetry] wait {}ms.", RETRY_INTERVAL_IN_MS);
     try {
       Thread.sleep(RETRY_INTERVAL_IN_MS);
     } catch (InterruptedException e) {
-      logger.error("interrupted when waiting retry");
+      logger.warn("interrupted when waiting retry");
       Thread.currentThread().interrupt();
     }
     retryCount++;
-    logger.info("start to retry. Retry count is: {}", retryCount);
-
+    logger.info("[Retry] retry count is: {}", retryCount);
+    stateMachine.transitionToQueued();
     // force invalid PartitionCache
     partitionFetcher.invalidAllCache();
+    // clear runtime variables in MPPQueryContext
+    context.prepareForRetry();
+    // re-stop
+    this.stopped.compareAndSet(true, false);
+    this.resultHandleCleanUp.compareAndSet(true, false);
     // re-analyze the query
     this.analysis = analyze(rawStatement, context, partitionFetcher, schemaFetcher);
     // re-start the QueryExecution
     this.start();
+    return getStatus();
   }
 
   private boolean skipExecute() {
@@ -231,53 +302,77 @@ public class QueryExecution implements IQueryExecution {
       MPPQueryContext context,
       IPartitionFetcher partitionFetcher,
       ISchemaFetcher schemaFetcher) {
-    return new Analyzer(context, partitionFetcher, schemaFetcher).analyze(statement);
+    final long startTime = System.nanoTime();
+    Analysis result;
+    try {
+      result = new Analyzer(context, partitionFetcher, schemaFetcher).analyze(statement);
+    } finally {
+      PERFORMANCE_OVERVIEW_METRICS.recordAnalyzeCost(System.nanoTime() - startTime);
+    }
+    return result;
   }
 
   private void schedule() {
+    final long startTime = System.nanoTime();
+    if (rawStatement instanceof LoadTsFileStatement) {
+      this.scheduler =
+          new LoadTsFileScheduler(
+              distributedPlan,
+              context,
+              stateMachine,
+              syncInternalServiceClientManager,
+              partitionFetcher);
+      this.scheduler.start();
+      return;
+    }
+
     // TODO: (xingtanzjr) initialize the query scheduler according to configuration
     this.scheduler =
-        config.isClusterMode()
-            ? new ClusterScheduler(
-                context,
-                stateMachine,
-                distributedPlan.getInstances(),
-                context.getQueryType(),
-                executor,
-                writeOperationExecutor,
-                scheduledExecutor,
-                internalServiceClientManager)
-            : new StandaloneScheduler(
-                context,
-                stateMachine,
-                distributedPlan.getInstances(),
-                context.getQueryType(),
-                executor,
-                scheduledExecutor,
-                internalServiceClientManager);
+        new ClusterScheduler(
+            context,
+            stateMachine,
+            distributedPlan.getInstances(),
+            context.getQueryType(),
+            executor,
+            writeOperationExecutor,
+            scheduledExecutor,
+            syncInternalServiceClientManager,
+            asyncInternalServiceClientManager);
     this.scheduler.start();
+    PERFORMANCE_OVERVIEW_METRICS.recordScheduleCost(System.nanoTime() - startTime);
   }
 
   // Use LogicalPlanner to do the logical query plan and logical optimization
   public void doLogicalPlan() {
     LogicalPlanner planner = new LogicalPlanner(this.context, this.planOptimizers);
     this.logicalPlan = planner.plan(this.analysis);
-    if (isQuery()) {
-      logger.info(
+    if (isQuery() && logger.isDebugEnabled()) {
+      logger.debug(
           "logical plan is: \n {}", PlanNodeUtil.nodeToString(this.logicalPlan.getRootNode()));
     }
+    // check timeout after building logical plan because it could be time-consuming in some cases.
+    checkTimeOutForQuery();
   }
 
   // Generate the distributed plan and split it into fragments
   public void doDistributedPlan() {
+    long startTime = System.nanoTime();
     DistributionPlanner planner = new DistributionPlanner(this.analysis, this.logicalPlan);
     this.distributedPlan = planner.planFragments();
-    if (isQuery()) {
-      logger.info(
+
+    if (rawStatement.isQuery()) {
+      QUERY_PLAN_COST_METRIC_SET.recordPlanCost(
+          DISTRIBUTION_PLANNER, System.nanoTime() - startTime);
+    }
+    if (isQuery() && logger.isDebugEnabled()) {
+      logger.debug(
           "distribution plan done. Fragment instance count is {}, details is: \n {}",
           distributedPlan.getInstances().size(),
           printFragmentInstances(distributedPlan.getInstances()));
     }
+    // check timeout after building distribution plan because it could be time-consuming in some
+    // cases.
+    checkTimeOutForQuery();
   }
 
   private String printFragmentInstances(List<FragmentInstance> instances) {
@@ -289,16 +384,25 @@ public class QueryExecution implements IQueryExecution {
   }
 
   // Stop the workers for this query
-  public void stop() {
-    if (this.scheduler != null) {
-      this.scheduler.stop();
+  public void stop(Throwable t) {
+    // only stop once
+    if (stopped.compareAndSet(false, true) && this.scheduler != null) {
+      this.scheduler.stop(t);
     }
   }
 
   // Stop the query and clean up all the resources this query occupied
   public void stopAndCleanup() {
-    stop();
+    stop(null);
     releaseResource();
+  }
+
+  @Override
+  public void cancel() {
+    stateMachine.transitionToCanceled(
+        new KilledByOthersException(),
+        new TSStatus(TSStatusCode.QUERY_WAS_KILLED.getStatusCode())
+            .setMessage(KilledByOthersException.MESSAGE));
   }
 
   /** Release the resources that current QueryExecution hold. */
@@ -311,7 +415,49 @@ public class QueryExecution implements IQueryExecution {
     // If the QueryExecution's state is abnormal, we should also abort the resultHandle without
     // waiting it to be finished.
     if (resultHandle != null) {
-      resultHandle.abort();
+      resultHandle.close();
+      cleanUpResultHandle();
+    }
+  }
+
+  private void cleanUpResultHandle() {
+    // Result handle belongs to special fragment instance, so we need to deregister it alone
+    // We don't need to deal with MemorySourceHandle because it doesn't register to memory pool
+    // We don't need to deal with LocalSourceHandle because the SharedTsBlockQueue uses the upstream
+    // FragmentInstanceId to register
+    if (resultHandleCleanUp.compareAndSet(false, true) && resultHandle instanceof SourceHandle) {
+      TFragmentInstanceId fragmentInstanceId = resultHandle.getLocalFragmentInstanceId();
+      MPPDataExchangeService.getInstance()
+          .getMPPDataExchangeManager()
+          .deRegisterFragmentInstanceFromMemoryPool(
+              fragmentInstanceId.queryId,
+              FragmentInstanceId.createFragmentInstanceIdFromTFragmentInstanceId(
+                  fragmentInstanceId));
+    }
+  }
+
+  // Stop the query and clean up all the resources this query occupied
+  public void stopAndCleanup(Throwable t) {
+    stop(t);
+    releaseResource(t);
+  }
+
+  /** Release the resources that current QueryExecution hold with a specified exception */
+  private void releaseResource(Throwable t) {
+    // close ResultHandle to unblock client's getResult request
+    // Actually, we should not close the ResultHandle when the QueryExecution is Finished.
+    // There are only two scenarios where the ResultHandle should be closed:
+    //   1. The client fetch all the result and the ResultHandle is finished.
+    //   2. The client's connection is closed that all owned QueryExecution should be cleaned up
+    // If the QueryExecution's state is abnormal, we should also abort the resultHandle without
+    // waiting it to be finished.
+    if (resultHandle != null) {
+      if (t != null) {
+        resultHandle.abort(t);
+      } else {
+        resultHandle.close();
+      }
+      cleanUpResultHandle();
     }
   }
 
@@ -322,35 +468,40 @@ public class QueryExecution implements IQueryExecution {
    * DataStreamManager use the virtual ResultOperator's ID (This part will be designed and
    * implemented with DataStreamManager)
    */
-  @Override
-  public Optional<TsBlock> getBatchResult() throws IoTDBException {
+  private <T> Optional<T> getResult(ISourceHandleSupplier<T> dataSupplier) throws IoTDBException {
     checkArgument(resultHandle != null, "ResultHandle in Coordinator should be init firstly.");
     // iterate until we get a non-nullable TsBlock or result is finished
     while (true) {
       try {
         if (resultHandle.isAborted()) {
-          logger.info("resultHandle for client is aborted");
+          logger.warn("[ResultHandleAborted]");
           stateMachine.transitionToAborted();
           if (stateMachine.getFailureStatus() != null) {
             throw new IoTDBException(
                 stateMachine.getFailureStatus().getMessage(), stateMachine.getFailureStatus().code);
           } else {
             throw new IoTDBException(
-                stateMachine.getFailureMessage(), TSStatusCode.QUERY_PROCESS_ERROR.getStatusCode());
+                stateMachine.getFailureMessage(),
+                TSStatusCode.EXECUTE_STATEMENT_ERROR.getStatusCode());
           }
         } else if (resultHandle.isFinished()) {
-          // Once the resultHandle is finished, we should transit the state of this query to
-          // FINISHED.
-          // So that the corresponding cleanup work could be triggered.
-          logger.info("resultHandle for client is finished");
+          logger.debug("[ResultHandleFinished]");
           stateMachine.transitionToFinished();
           return Optional.empty();
         }
 
-        ListenableFuture<?> blocked = resultHandle.isBlocked();
-        blocked.get();
+        long startTime = System.nanoTime();
+        try {
+          ListenableFuture<?> blocked = resultHandle.isBlocked();
+          blocked.get();
+        } finally {
+          QUERY_EXECUTION_METRIC_SET.recordExecutionCost(
+              WAIT_FOR_RESULT, System.nanoTime() - startTime);
+        }
+
         if (!resultHandle.isFinished()) {
-          TsBlock res = resultHandle.receive();
+          // use the getSerializedTsBlock instead of receive to get ByteBuffer result
+          T res = dataSupplier.get();
           if (res == null) {
             continue;
           }
@@ -359,20 +510,46 @@ public class QueryExecution implements IQueryExecution {
           return Optional.empty();
         }
       } catch (ExecutionException | CancellationException e) {
-        stateMachine.transitionToFailed(e);
-        if (stateMachine.getFailureStatus() != null) {
-          throw new IoTDBException(
-              stateMachine.getFailureStatus().getMessage(), stateMachine.getFailureStatus().code);
-        }
-        Throwable t = e.getCause() == null ? e : e.getCause();
-        throwIfUnchecked(t);
-        throw new IoTDBException(t, TSStatusCode.QUERY_PROCESS_ERROR.getStatusCode());
+        dealWithException(e.getCause() != null ? e.getCause() : e);
       } catch (InterruptedException e) {
-        stateMachine.transitionToFailed(e);
         Thread.currentThread().interrupt();
-        throw new IoTDBException(e, TSStatusCode.QUERY_PROCESS_ERROR.getStatusCode());
+        dealWithException(e);
+      } catch (Throwable t) {
+        dealWithException(t);
       }
     }
+  }
+
+  private void dealWithException(Throwable t) throws IoTDBException {
+    stateMachine.transitionToFailed(t);
+    if (stateMachine.getFailureStatus() != null) {
+      throw new IoTDBException(
+          stateMachine.getFailureStatus().getMessage(), stateMachine.getFailureStatus().code);
+    } else if (stateMachine.getFailureException() != null) {
+      Throwable rootCause = stateMachine.getFailureException();
+      throw new IoTDBException(rootCause, TSStatusCode.EXECUTE_STATEMENT_ERROR.getStatusCode());
+    } else {
+      throwIfUnchecked(t);
+      throw new IoTDBException(t, TSStatusCode.QUERY_PROCESS_ERROR.getStatusCode());
+    }
+  }
+
+  @Override
+  public Optional<TsBlock> getBatchResult() throws IoTDBException {
+    return getResult(this::getDeserializedTsBlock);
+  }
+
+  private TsBlock getDeserializedTsBlock() {
+    return resultHandle.receive();
+  }
+
+  @Override
+  public Optional<ByteBuffer> getByteBufferBatchResult() throws IoTDBException {
+    return getResult(this::getSerializedTsBlock);
+  }
+
+  private ByteBuffer getSerializedTsBlock() throws IoTDBException {
+    return resultHandle.getSerializedTsBlock();
   }
 
   /** @return true if there is more tsblocks, otherwise false */
@@ -408,11 +585,20 @@ public class QueryExecution implements IQueryExecution {
       SettableFuture<QueryState> future = SettableFuture.create();
       stateMachine.addStateChangeListener(
           state -> {
-            if (state == QueryState.RUNNING || state.isDone()) {
+            if (state == QueryState.RUNNING
+                || state.isDone()
+                || state == QueryState.PENDING_RETRY) {
               future.set(state);
             }
           });
       QueryState state = future.get();
+      if (state == QueryState.PENDING_RETRY) {
+        // That we put retry() here is aimed to leverage the ClientRPC thread rather than
+        // create another new thread to do the retry() logic.
+        // This way will lead to recursive call because retry() calls getStatus() inside.
+        // The max depths of recursive call is equal to the max retry count.
+        return retry();
+      }
       // TODO: (xingtanzjr) use more TSStatusCode if the QueryState isn't FINISHED
       return getExecutionResult(state);
     } catch (InterruptedException | ExecutionException e) {
@@ -436,16 +622,19 @@ public class QueryExecution implements IQueryExecution {
         isSameNode(upstreamEndPoint)
             ? MPPDataExchangeService.getInstance()
                 .getMPPDataExchangeManager()
-                .createLocalSourceHandle(
+                .createLocalSourceHandleForFragment(
                     context.getResultNodeContext().getVirtualFragmentInstanceId().toThrift(),
                     context.getResultNodeContext().getVirtualResultNodeId().getId(),
+                    context.getResultNodeContext().getUpStreamPlanNodeId().getId(),
                     context.getResultNodeContext().getUpStreamFragmentInstanceId().toThrift(),
+                    0, // Upstream of result ExchangeNode will only have one child.
                     stateMachine::transitionToFailed)
             : MPPDataExchangeService.getInstance()
                 .getMPPDataExchangeManager()
                 .createSourceHandle(
                     context.getResultNodeContext().getVirtualFragmentInstanceId().toThrift(),
                     context.getResultNodeContext().getVirtualResultNodeId().getId(),
+                    0,
                     upstreamEndPoint,
                     context.getResultNodeContext().getUpStreamFragmentInstanceId().toThrift(),
                     stateMachine::transitionToFailed);
@@ -453,13 +642,25 @@ public class QueryExecution implements IQueryExecution {
 
   @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
   private ExecutionResult getExecutionResult(QueryState state) {
-    TSStatusCode statusCode =
-        // For WRITE, the state should be FINISHED; For READ, the state could be RUNNING
-        state == QueryState.FINISHED || state == QueryState.RUNNING
-            ? TSStatusCode.SUCCESS_STATUS
-            : TSStatusCode.QUERY_PROCESS_ERROR;
+    TSStatusCode statusCode;
+    if (context.getQueryType() == QueryType.WRITE && analysis.isFailed()) {
+      // For WRITE, the state should be FINISHED
+      statusCode =
+          state == QueryState.FINISHED
+              ? TSStatusCode.SUCCESS_STATUS
+              : TSStatusCode.WRITE_PROCESS_ERROR;
+    } else {
+      // For READ, the state could be FINISHED and RUNNING
+      statusCode =
+          state == QueryState.FINISHED || state == QueryState.RUNNING
+              ? TSStatusCode.SUCCESS_STATUS
+              : TSStatusCode.EXECUTE_STATEMENT_ERROR;
+    }
 
-    TSStatus tsstatus = RpcUtils.getStatus(statusCode, stateMachine.getFailureMessage());
+    TSStatus tsstatus =
+        RpcUtils.getStatus(
+            statusCode,
+            statusCode == TSStatusCode.SUCCESS_STATUS ? "" : stateMachine.getFailureMessage());
 
     // If RETRYING is triggered by this QueryExecution, the stateMachine.getFailureStatus() is also
     // not null. We should only return the failure status when QueryExecution is in Done state.
@@ -468,30 +669,41 @@ public class QueryExecution implements IQueryExecution {
     }
 
     // collect redirect info to client for writing
-    if (analysis.getStatement() instanceof InsertBaseStatement) {
+    // if 0.13_data_insert_adapt is true and ClientVersion is NOT V_1_0, stop returning redirect
+    // info to client
+    if (analysis.getStatement() instanceof InsertBaseStatement
+        && !analysis.isFinishQueryAfterAnalyze()
+        && (!config.isEnable13DataInsertAdapt()
+            || IoTDBConstant.ClientVersion.V_1_0.equals(context.getSession().getVersion()))) {
       InsertBaseStatement insertStatement = (InsertBaseStatement) analysis.getStatement();
-      List<TEndPoint> redirectNodeList;
-      if (config.isClusterMode()) {
-        redirectNodeList = insertStatement.collectRedirectInfo(analysis.getDataPartitionInfo());
-      } else {
-        redirectNodeList = Collections.emptyList();
-      }
+      List<TEndPoint> redirectNodeList = analysis.getRedirectNodeList();
       if (insertStatement instanceof InsertRowsStatement
           || insertStatement instanceof InsertMultiTabletsStatement) {
         // multiple devices
         if (statusCode == TSStatusCode.SUCCESS_STATUS) {
+          boolean needRedirect = false;
           List<TSStatus> subStatus = new ArrayList<>();
-          tsstatus.setCode(TSStatusCode.NEED_REDIRECTION.getStatusCode());
           for (TEndPoint endPoint : redirectNodeList) {
-            subStatus.add(
-                StatusUtils.getStatus(TSStatusCode.NEED_REDIRECTION).setRedirectNode(endPoint));
+            // redirect writing only if the redirectEndPoint is not the current node
+            if (!config.getAddressAndPort().equals(endPoint)) {
+              subStatus.add(
+                  RpcUtils.getStatus(TSStatusCode.SUCCESS_STATUS).setRedirectNode(endPoint));
+              needRedirect = true;
+            } else {
+              subStatus.add(RpcUtils.getStatus(TSStatusCode.SUCCESS_STATUS));
+            }
           }
-          tsstatus.setSubStatus(subStatus);
+          if (needRedirect) {
+            tsstatus.setCode(TSStatusCode.REDIRECTION_RECOMMEND.getStatusCode());
+            tsstatus.setSubStatus(subStatus);
+          }
         }
       } else {
         // single device
-        if (config.isClusterMode()) {
-          tsstatus.setRedirectNode(redirectNodeList.get(0));
+        TEndPoint redirectEndPoint = redirectNodeList.get(0);
+        // redirect writing only if the redirectEndPoint is not the current node
+        if (!config.getAddressAndPort().equals(redirectEndPoint)) {
+          tsstatus.setRedirectNode(redirectEndPoint);
         }
       }
     }
@@ -515,6 +727,31 @@ public class QueryExecution implements IQueryExecution {
   @Override
   public String getQueryId() {
     return context.getQueryId().getId();
+  }
+
+  @Override
+  public long getStartExecutionTime() {
+    return context.getStartTime();
+  }
+
+  @Override
+  public void recordExecutionTime(long executionTime) {
+    totalExecutionTime += executionTime;
+  }
+
+  @Override
+  public long getTotalExecutionTime() {
+    return totalExecutionTime;
+  }
+
+  @Override
+  public Optional<String> getExecuteSQL() {
+    return Optional.ofNullable(context.getSql());
+  }
+
+  @Override
+  public Statement getStatement() {
+    return analysis.getStatement();
   }
 
   public String toString() {

@@ -19,34 +19,56 @@
 
 package org.apache.iotdb.db.metadata.cache;
 
-import org.apache.iotdb.db.metadata.lastCache.container.ILastCacheContainer;
-import org.apache.iotdb.db.metadata.lastCache.container.LastCacheContainer;
+import org.apache.iotdb.commons.schema.view.LogicalViewSchema;
+import org.apache.iotdb.db.metadata.cache.lastCache.container.ILastCacheContainer;
+import org.apache.iotdb.db.metadata.cache.lastCache.container.LastCacheContainer;
+import org.apache.iotdb.db.mpp.common.schematree.IMeasurementSchemaInfo;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
+import org.apache.iotdb.tsfile.write.schema.IMeasurementSchema;
 import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
 
-public class SchemaCacheEntry {
+import java.util.Map;
 
-  private final MeasurementSchema measurementSchema;
+public class SchemaCacheEntry implements IMeasurementSchemaInfo {
 
+  private final String storageGroup;
+
+  private final IMeasurementSchema iMeasurementSchema;
+
+  private final Map<String, String> tagMap;
   private final boolean isAligned;
 
   private volatile ILastCacheContainer lastCacheContainer = null;
 
-  SchemaCacheEntry(MeasurementSchema measurementSchema, boolean isAligned) {
-    this.measurementSchema = measurementSchema;
+  SchemaCacheEntry(
+      String storageGroup,
+      IMeasurementSchema iMeasurementSchema,
+      Map<String, String> tagMap,
+      boolean isAligned) {
+    this.storageGroup = storageGroup.intern();
+    this.iMeasurementSchema = iMeasurementSchema;
     this.isAligned = isAligned;
+    this.tagMap = tagMap;
   }
 
   public String getSchemaEntryId() {
-    return measurementSchema.getMeasurementId();
+    return iMeasurementSchema.getMeasurementId();
   }
 
-  public MeasurementSchema getMeasurementSchema() {
-    return measurementSchema;
+  public String getStorageGroup() {
+    return storageGroup;
+  }
+
+  public IMeasurementSchema getIMeasurementSchema() {
+    return iMeasurementSchema;
+  }
+
+  public Map<String, String> getTagMap() {
+    return tagMap;
   }
 
   public TSDataType getTsDataType() {
-    return measurementSchema.getType();
+    return iMeasurementSchema.getType();
   }
 
   public boolean isAligned() {
@@ -88,6 +110,42 @@ public class SchemaCacheEntry {
    */
   public static int estimateSize(SchemaCacheEntry schemaCacheEntry) {
     // each char takes 2B in Java
-    return 100 + 2 * schemaCacheEntry.getMeasurementSchema().getMeasurementId().length();
+    return 100 + 2 * schemaCacheEntry.getIMeasurementSchema().getMeasurementId().length();
+  }
+
+  @Override
+  public String getName() {
+    return iMeasurementSchema.getMeasurementId();
+  }
+
+  @Override
+  public IMeasurementSchema getSchema() {
+    return iMeasurementSchema;
+  }
+
+  @Override
+  public MeasurementSchema getSchemaAsMeasurementSchema() {
+    if (this.iMeasurementSchema instanceof MeasurementSchema) {
+      return (MeasurementSchema) this.getSchema();
+    }
+    return null;
+  }
+
+  @Override
+  public LogicalViewSchema getSchemaAsLogicalViewSchema() {
+    if (this.iMeasurementSchema instanceof LogicalViewSchema) {
+      return (LogicalViewSchema) this.getSchema();
+    }
+    return null;
+  }
+
+  @Override
+  public String getAlias() {
+    return null;
+  }
+
+  @Override
+  public boolean isLogicalView() {
+    return this.iMeasurementSchema.isLogicalView();
   }
 }

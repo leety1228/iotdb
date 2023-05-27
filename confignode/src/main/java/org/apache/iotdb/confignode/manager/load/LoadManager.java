@@ -16,60 +16,41 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+
 package org.apache.iotdb.confignode.manager.load;
 
-import org.apache.iotdb.common.rpc.thrift.TConfigNodeLocation;
 import org.apache.iotdb.common.rpc.thrift.TConsensusGroupId;
 import org.apache.iotdb.common.rpc.thrift.TConsensusGroupType;
-import org.apache.iotdb.common.rpc.thrift.TDataNodeConfiguration;
-import org.apache.iotdb.common.rpc.thrift.TDataNodeLocation;
-import org.apache.iotdb.common.rpc.thrift.TEndPoint;
 import org.apache.iotdb.common.rpc.thrift.TRegionReplicaSet;
 import org.apache.iotdb.common.rpc.thrift.TSeriesPartitionSlot;
-import org.apache.iotdb.common.rpc.thrift.TTimePartitionSlot;
 import org.apache.iotdb.commons.cluster.NodeStatus;
-import org.apache.iotdb.commons.concurrent.IoTDBThreadPoolFactory;
-import org.apache.iotdb.commons.concurrent.threadpool.ScheduledExecutorUtil;
+import org.apache.iotdb.commons.cluster.NodeType;
+import org.apache.iotdb.commons.cluster.RegionStatus;
 import org.apache.iotdb.commons.partition.DataPartitionTable;
 import org.apache.iotdb.commons.partition.SchemaPartitionTable;
-import org.apache.iotdb.confignode.client.DataNodeRequestType;
-import org.apache.iotdb.confignode.client.async.confignode.AsyncConfigNodeClientPool;
-import org.apache.iotdb.confignode.client.async.datanode.AsyncDataNodeClientPool;
-import org.apache.iotdb.confignode.client.async.handlers.ConfigNodeHeartbeatHandler;
-import org.apache.iotdb.confignode.client.async.handlers.DataNodeHeartbeatHandler;
-import org.apache.iotdb.confignode.conf.ConfigNodeConfig;
-import org.apache.iotdb.confignode.conf.ConfigNodeDescriptor;
-import org.apache.iotdb.confignode.consensus.request.write.CreateRegionGroupsPlan;
+import org.apache.iotdb.confignode.consensus.request.write.region.CreateRegionGroupsPlan;
+import org.apache.iotdb.confignode.exception.DatabaseNotExistsException;
+import org.apache.iotdb.confignode.exception.NoAvailableRegionGroupException;
 import org.apache.iotdb.confignode.exception.NotEnoughDataNodeException;
-import org.apache.iotdb.confignode.exception.StorageGroupNotExistsException;
-import org.apache.iotdb.confignode.manager.ClusterSchemaManager;
-import org.apache.iotdb.confignode.manager.ConsensusManager;
 import org.apache.iotdb.confignode.manager.IManager;
-import org.apache.iotdb.confignode.manager.NodeManager;
-import org.apache.iotdb.confignode.manager.PartitionManager;
 import org.apache.iotdb.confignode.manager.load.balancer.PartitionBalancer;
 import org.apache.iotdb.confignode.manager.load.balancer.RegionBalancer;
 import org.apache.iotdb.confignode.manager.load.balancer.RouteBalancer;
-import org.apache.iotdb.confignode.manager.load.heartbeat.ConfigNodeHeartbeatCache;
-import org.apache.iotdb.confignode.manager.load.heartbeat.DataNodeHeartbeatCache;
-import org.apache.iotdb.confignode.manager.load.heartbeat.INodeCache;
-import org.apache.iotdb.confignode.manager.load.heartbeat.IRegionGroupCache;
-import org.apache.iotdb.mpp.rpc.thrift.THeartbeatReq;
-import org.apache.iotdb.mpp.rpc.thrift.TRegionRouteReq;
+import org.apache.iotdb.confignode.manager.load.cache.LoadCache;
+import org.apache.iotdb.confignode.manager.load.cache.node.NodeHeartbeatSample;
+import org.apache.iotdb.confignode.manager.load.cache.region.RegionHeartbeatSample;
+import org.apache.iotdb.confignode.manager.load.service.HeartbeatService;
+import org.apache.iotdb.confignode.manager.load.service.StatisticsService;
+import org.apache.iotdb.confignode.manager.partition.RegionGroupStatus;
+import org.apache.iotdb.confignode.rpc.thrift.TTimeSlotList;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.google.common.eventbus.AsyncEventBus;
+import com.google.common.eventbus.EventBus;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 /**
  * The LoadManager at ConfigNodeGroup-Leader is active. It proactively implements the cluster
@@ -77,380 +58,340 @@ import java.util.stream.Collectors;
  */
 public class LoadManager {
 
-  private static final Logger LOGGER = LoggerFactory.getLogger(LoadManager.class);
-
-  private static final ConfigNodeConfig conf = ConfigNodeDescriptor.getInstance().getConf();
-  private static final long heartbeatInterval = conf.getHeartbeatInterval();
-  public static final TEndPoint currentNode =
-      new TEndPoint(conf.getInternalAddress(), conf.getInternalPort());
-
   private final IManager configManager;
 
-  /** Heartbeat sample cache */
-  // Map<NodeId, IHeartbeatStatistic>
-  private final Map<Integer, INodeCache> nodeCacheMap;
-  // Map<RegionId, RegionGroupCache>
-  private final Map<TConsensusGroupId, IRegionGroupCache> regionGroupCacheMap;
-
-  /** Balancers */
+  /** Balancers. */
   private final RegionBalancer regionBalancer;
 
   private final PartitionBalancer partitionBalancer;
   private final RouteBalancer routeBalancer;
 
-  /** Heartbeat executor service */
-  private final AtomicInteger heartbeatCounter = new AtomicInteger(0);
+  /** Cluster load services. */
+  private final LoadCache loadCache;
 
-  private Future<?> currentHeartbeatFuture;
-  private final ScheduledExecutorService heartBeatExecutor =
-      IoTDBThreadPoolFactory.newSingleThreadScheduledExecutor(LoadManager.class.getSimpleName());
+  private final HeartbeatService heartbeatService;
+  private final StatisticsService statisticsService;
 
-  /** Load balancing executor service */
-  private Future<?> currentLoadBalancingFuture;
-
-  private final ScheduledExecutorService loadBalancingExecutor =
-      IoTDBThreadPoolFactory.newSingleThreadScheduledExecutor(LoadManager.class.getSimpleName());
-
-  /** Monitor for leadership change */
-  private final Object scheduleMonitor = new Object();
+  private final EventBus loadPublisher =
+      new AsyncEventBus("Cluster-LoadPublisher-Thread", Executors.newFixedThreadPool(5));
 
   public LoadManager(IManager configManager) {
     this.configManager = configManager;
-    this.nodeCacheMap = new ConcurrentHashMap<>();
-    this.regionGroupCacheMap = new ConcurrentHashMap<>();
 
     this.regionBalancer = new RegionBalancer(configManager);
     this.partitionBalancer = new PartitionBalancer(configManager);
     this.routeBalancer = new RouteBalancer(configManager);
+
+    this.loadCache = new LoadCache();
+    this.heartbeatService = new HeartbeatService(configManager, loadCache);
+    this.statisticsService =
+        new StatisticsService(configManager, routeBalancer, loadCache, loadPublisher);
+
+    loadPublisher.register(statisticsService);
+    loadPublisher.register(configManager.getPipeManager().getPipeRuntimeCoordinator());
   }
 
   /**
-   * Allocate and create Regions for each StorageGroup.
+   * Generate an optimal CreateRegionGroupsPlan.
    *
    * @param allotmentMap Map<StorageGroupName, Region allotment>
-   * @param consensusGroupType TConsensusGroupType of Region to be allocated
+   * @param consensusGroupType TConsensusGroupType of RegionGroup to be allocated
+   * @return CreateRegionGroupsPlan
+   * @throws NotEnoughDataNodeException If there are not enough DataNodes
+   * @throws DatabaseNotExistsException If some specific StorageGroups don't exist
    */
-  public void doRegionCreation(
+  public CreateRegionGroupsPlan allocateRegionGroups(
       Map<String, Integer> allotmentMap, TConsensusGroupType consensusGroupType)
-      throws NotEnoughDataNodeException, StorageGroupNotExistsException {
-    CreateRegionGroupsPlan createRegionGroupsPlan =
-        regionBalancer.genRegionsAllocationPlan(allotmentMap, consensusGroupType);
-
-    // TODO: Use procedure to protect the following process
-    // Create Regions on DataNodes
-    Map<String, Long> ttlMap = new HashMap<>();
-    for (String storageGroup : createRegionGroupsPlan.getRegionGroupMap().keySet()) {
-      ttlMap.put(
-          storageGroup,
-          getClusterSchemaManager().getStorageGroupSchemaByName(storageGroup).getTTL());
-    }
-    AsyncDataNodeClientPool.getInstance().createRegions(createRegionGroupsPlan, ttlMap);
-    // Persist the allocation result
-    getConsensusManager().write(createRegionGroupsPlan);
+      throws NotEnoughDataNodeException, DatabaseNotExistsException {
+    return regionBalancer.genRegionGroupsAllocationPlan(allotmentMap, consensusGroupType);
   }
 
   /**
-   * Allocate SchemaPartitions
+   * Allocate SchemaPartitions.
    *
    * @param unassignedSchemaPartitionSlotsMap SchemaPartitionSlots that should be assigned
    * @return Map<StorageGroupName, SchemaPartitionTable>, the allocating result
    */
   public Map<String, SchemaPartitionTable> allocateSchemaPartition(
-      Map<String, List<TSeriesPartitionSlot>> unassignedSchemaPartitionSlotsMap) {
+      Map<String, List<TSeriesPartitionSlot>> unassignedSchemaPartitionSlotsMap)
+      throws NoAvailableRegionGroupException {
     return partitionBalancer.allocateSchemaPartition(unassignedSchemaPartitionSlotsMap);
   }
 
   /**
-   * Allocate DataPartitions
+   * Allocate DataPartitions.
    *
    * @param unassignedDataPartitionSlotsMap DataPartitionSlots that should be assigned
    * @return Map<StorageGroupName, DataPartitionTable>, the allocating result
    */
   public Map<String, DataPartitionTable> allocateDataPartition(
-      Map<String, Map<TSeriesPartitionSlot, List<TTimePartitionSlot>>>
-          unassignedDataPartitionSlotsMap) {
+      Map<String, Map<TSeriesPartitionSlot, TTimeSlotList>> unassignedDataPartitionSlotsMap)
+      throws NoAvailableRegionGroupException {
     return partitionBalancer.allocateDataPartition(unassignedDataPartitionSlotsMap);
   }
 
-  /**
-   * Generate an optimal real-time read/write requests routing policy.
-   *
-   * @return Map<TConsensusGroupId, TRegionReplicaSet>, The routing policy of read/write requests
-   *     for each Region is based on the order in the TRegionReplicaSet. The replica with higher
-   *     sorting result have higher priority.
-   */
-  public Map<TConsensusGroupId, TRegionReplicaSet> genLatestRegionRouteMap() {
-    return routeBalancer.genLatestRegionRouteMap(getPartitionManager().getAllReplicaSets());
+  public void broadcastLatestRegionRouteMap() {
+    statisticsService.broadcastLatestRegionRouteMap();
+  }
+
+  public void startLoadServices() {
+    loadCache.initHeartbeatCache(configManager);
+    heartbeatService.startHeartbeatService();
+    statisticsService.startLoadStatisticsService();
+  }
+
+  public void stopLoadServices() {
+    heartbeatService.stopHeartbeatService();
+    statisticsService.stopLoadStatisticsService();
+    loadCache.clearHeartbeatCache();
   }
 
   /**
-   * Get the loadScore of each DataNode
+   * Safely get NodeStatus by NodeId.
+   *
+   * @param nodeId The specified NodeId
+   * @return NodeStatus of the specified Node. Unknown if cache doesn't exist.
+   */
+  public NodeStatus getNodeStatus(int nodeId) {
+    return loadCache.getNodeStatus(nodeId);
+  }
+
+  /**
+   * Safely get the specified Node's current status with reason.
+   *
+   * @param nodeId The specified NodeId
+   * @return The specified Node's current status if the nodeCache contains it, Unknown otherwise
+   */
+  public String getNodeStatusWithReason(int nodeId) {
+    return loadCache.getNodeStatusWithReason(nodeId);
+  }
+
+  /**
+   * Get all Node's current status with reason.
+   *
+   * @return Map<NodeId, NodeStatus with reason>
+   */
+  public Map<Integer, String> getNodeStatusWithReason() {
+    return loadCache.getNodeStatusWithReason();
+  }
+
+  /**
+   * Filter ConfigNodes through the specified NodeStatus.
+   *
+   * @param status The specified NodeStatus
+   * @return Filtered ConfigNodes with the specified NodeStatus
+   */
+  public List<Integer> filterConfigNodeThroughStatus(NodeStatus... status) {
+    return loadCache.filterConfigNodeThroughStatus(status);
+  }
+
+  /**
+   * Filter DataNodes through the specified NodeStatus.
+   *
+   * @param status The specified NodeStatus
+   * @return Filtered DataNodes with the specified NodeStatus
+   */
+  public List<Integer> filterDataNodeThroughStatus(NodeStatus... status) {
+    return loadCache.filterDataNodeThroughStatus(status);
+  }
+
+  /**
+   * Get the free disk space of the specified DataNode.
+   *
+   * @param dataNodeId The index of the specified DataNode
+   * @return The free disk space that sample through heartbeat, 0 if no heartbeat received
+   */
+  public double getFreeDiskSpace(int dataNodeId) {
+    return loadCache.getFreeDiskSpace(dataNodeId);
+  }
+
+  /**
+   * Get the loadScore of each DataNode.
    *
    * @return Map<DataNodeId, loadScore>
    */
-  public Map<Integer, Long> getAllLoadScores() {
-    Map<Integer, Long> result = new ConcurrentHashMap<>();
-
-    nodeCacheMap.forEach(
-        (dataNodeId, heartbeatCache) -> result.put(dataNodeId, heartbeatCache.getLoadScore()));
-
-    return result;
+  public Map<Integer, Long> getAllDataNodeLoadScores() {
+    return loadCache.getAllDataNodeLoadScores();
   }
 
   /**
-   * Get the leadership of each RegionGroup
+   * Get the lowest loadScore DataNode.
    *
-   * @return Map<RegionGroupId, leader location>
+   * @return The index of the lowest loadScore DataNode. -1 if no DataNode heartbeat received.
    */
-  public Map<TConsensusGroupId, Integer> getAllLeadership() {
-    Map<TConsensusGroupId, Integer> result = new ConcurrentHashMap<>();
-
-    regionGroupCacheMap.forEach(
-        (consensusGroupId, regionGroupCache) ->
-            result.put(consensusGroupId, regionGroupCache.getLeaderDataNodeId()));
-
-    return result;
+  public int getLowestLoadDataNode() {
+    return loadCache.getLowestLoadDataNode();
   }
 
-  /** Start the heartbeat service and the load balancing service */
-  public void start() {
-    LOGGER.debug("Start Heartbeat Service of LoadManager");
-    synchronized (scheduleMonitor) {
-      /* Start the heartbeat service */
-      if (currentHeartbeatFuture == null) {
-        currentHeartbeatFuture =
-            ScheduledExecutorUtil.safelyScheduleWithFixedDelay(
-                heartBeatExecutor,
-                this::heartbeatLoopBody,
-                0,
-                heartbeatInterval,
-                TimeUnit.MILLISECONDS);
-        LOGGER.info("Heartbeat service is started successfully.");
-      }
-
-      /* Start the load balancing service */
-      if (currentLoadBalancingFuture == null) {
-        currentLoadBalancingFuture =
-            ScheduledExecutorUtil.safelyScheduleWithFixedDelay(
-                loadBalancingExecutor,
-                this::updateNodeLoadStatistic,
-                0,
-                heartbeatInterval,
-                TimeUnit.MILLISECONDS);
-        LOGGER.info("LoadBalancing service is started successfully.");
-      }
-    }
+  /**
+   * Get the lowest loadScore DataNode from the specified DataNodes.
+   *
+   * @param dataNodeIds The specified DataNodes
+   * @return The index of the lowest loadScore DataNode. -1 if no DataNode heartbeat received.
+   */
+  public int getLowestLoadDataNode(List<Integer> dataNodeIds) {
+    return loadCache.getLowestLoadDataNode(dataNodeIds);
   }
 
-  /** Stop the heartbeat service and the load balancing service */
-  public void stop() {
-    LOGGER.debug("Stop Heartbeat Service and LoadBalancing Service of LoadManager");
-    synchronized (scheduleMonitor) {
-      if (currentHeartbeatFuture != null) {
-        currentHeartbeatFuture.cancel(false);
-        currentHeartbeatFuture = null;
-        LOGGER.info("Heartbeat service is stopped successfully.");
-        currentLoadBalancingFuture.cancel(false);
-        currentLoadBalancingFuture = null;
-        LOGGER.info("LoadBalancing service is stopped successfully.");
-      }
-    }
+  /**
+   * Force update the specified Node's cache.
+   *
+   * @param nodeType Specified NodeType
+   * @param nodeId Specified NodeId
+   * @param heartbeatSample Specified NodeHeartbeatSample
+   */
+  public void forceUpdateNodeCache(
+      NodeType nodeType, int nodeId, NodeHeartbeatSample heartbeatSample) {
+    loadCache.forceUpdateNodeCache(nodeType, nodeId, heartbeatSample);
   }
 
-  private void updateNodeLoadStatistic() {
-    AtomicBoolean isNeedBroadcast = new AtomicBoolean(false);
+  /** Remove the specified Node's cache. */
+  public void removeNodeCache(int nodeId) {
+    loadCache.removeNodeCache(nodeId);
+  }
 
-    nodeCacheMap
-        .values()
+  /**
+   * Safely get RegionStatus.
+   *
+   * @param consensusGroupId Specified RegionGroupId
+   * @param dataNodeId Specified RegionReplicaId
+   * @return Corresponding RegionStatus if cache exists, Unknown otherwise
+   */
+  public RegionStatus getRegionStatus(TConsensusGroupId consensusGroupId, int dataNodeId) {
+    return loadCache.getRegionStatus(consensusGroupId, dataNodeId);
+  }
+
+  /**
+   * Safely get RegionGroupStatus.
+   *
+   * @param consensusGroupId Specified RegionGroupId
+   * @return Corresponding RegionGroupStatus if cache exists, Disabled otherwise
+   */
+  public RegionGroupStatus getRegionGroupStatus(TConsensusGroupId consensusGroupId) {
+    return loadCache.getRegionGroupStatus(consensusGroupId);
+  }
+
+  /**
+   * Safely get RegionGroupStatus.
+   *
+   * @param consensusGroupIds Specified RegionGroupIds
+   * @return Corresponding RegionGroupStatus if cache exists, Disabled otherwise
+   */
+  public Map<TConsensusGroupId, RegionGroupStatus> getRegionGroupStatus(
+      List<TConsensusGroupId> consensusGroupIds) {
+    return loadCache.getRegionGroupStatus(consensusGroupIds);
+  }
+
+  /**
+   * Filter the RegionGroups through the RegionGroupStatus.
+   *
+   * @param status The specified RegionGroupStatus
+   * @return Filtered RegionGroups with the specified RegionGroupStatus
+   */
+  public List<TConsensusGroupId> filterRegionGroupThroughStatus(RegionGroupStatus... status) {
+    return loadCache.filterRegionGroupThroughStatus(status);
+  }
+
+  /**
+   * Count the number of cluster Regions with specified RegionStatus.
+   *
+   * @param type The specified RegionGroupType
+   * @param status The specified statues
+   * @return The number of cluster Regions with specified RegionStatus
+   */
+  public int countRegionWithSpecifiedStatus(TConsensusGroupType type, RegionStatus... status) {
+    return loadCache.countRegionWithSpecifiedStatus(type, status);
+  }
+
+  /**
+   * Force update the specified RegionGroup's cache.
+   *
+   * @param regionGroupId Specified RegionGroupId
+   * @param heartbeatSampleMap Specified RegionHeartbeatSampleMap
+   */
+  public void forceUpdateRegionGroupCache(
+      TConsensusGroupId regionGroupId, Map<Integer, RegionHeartbeatSample> heartbeatSampleMap) {
+    loadCache.forceUpdateRegionGroupCache(regionGroupId, heartbeatSampleMap);
+  }
+
+  /** Remove the specified RegionGroup's cache. */
+  public void removeRegionGroupCache(TConsensusGroupId consensusGroupId) {
+    loadCache.removeRegionGroupCache(consensusGroupId);
+  }
+
+  /**
+   * Get the latest RegionLeaderMap.
+   *
+   * @return Map<RegionGroupId, leaderId>
+   */
+  public Map<TConsensusGroupId, Integer> getRegionLeaderMap() {
+    return loadCache.getRegionLeaderMap();
+  }
+
+  /**
+   * Get the latest RegionPriorityMap.
+   *
+   * @return Map<RegionGroupId, RegionPriority>.
+   */
+  public Map<TConsensusGroupId, TRegionReplicaSet> getRegionPriorityMap() {
+    return loadCache.getRegionPriorityMap();
+  }
+
+  /**
+   * Get the number of RegionGroup-leaders in the specified DataNode.
+   *
+   * @param dataNodeId The specified DataNode
+   * @param type SchemaRegion or DataRegion
+   * @return The number of RegionGroup-leaders
+   */
+  public int getRegionGroupLeaderCount(int dataNodeId, TConsensusGroupType type) {
+    AtomicInteger result = new AtomicInteger(0);
+    getRegionLeaderMap()
         .forEach(
-            nodeCache -> {
-              boolean updateResult = nodeCache.updateLoadStatistic();
-              if (conf.getRoutingPolicy().equals(RouteBalancer.greedyPolicy)
-                  && nodeCache instanceof DataNodeHeartbeatCache) {
-                // We need a broadcast when some DataNode fail down
-                isNeedBroadcast.compareAndSet(false, updateResult);
+            ((consensusGroupId, leaderId) -> {
+              if (dataNodeId == leaderId && type.equals(consensusGroupId.getType())) {
+                result.getAndIncrement();
               }
-            });
-
-    regionGroupCacheMap
-        .values()
-        .forEach(
-            regionGroupCache -> {
-              boolean updateResult = regionGroupCache.updateLoadStatistic();
-              if (conf.getRoutingPolicy().equals(RouteBalancer.leaderPolicy)) {
-                // We need a broadcast when the leadership changed
-                isNeedBroadcast.compareAndSet(false, updateResult);
-              }
-            });
-
-    if (isNeedBroadcast.get()) {
-      broadcastLatestRegionRouteMap();
-    }
-  }
-
-  private void broadcastLatestRegionRouteMap() {
-    Map<TConsensusGroupId, TRegionReplicaSet> latestRegionRouteMap = genLatestRegionRouteMap();
-    Map<Integer, TDataNodeLocation> dataNodeLocationMap = new ConcurrentHashMap<>();
-    getOnlineDataNodes(-1)
-        .forEach(
-            onlineDataNode ->
-                dataNodeLocationMap.put(
-                    onlineDataNode.getLocation().getDataNodeId(), onlineDataNode.getLocation()));
-
-    LOGGER.info("Begin to broadcast RegionRouteMap:");
-    long broadcastTime = System.currentTimeMillis();
-    printRegionRouteMap(broadcastTime, latestRegionRouteMap);
-    AsyncDataNodeClientPool.getInstance()
-        .sendAsyncRequestToDataNodeWithRetry(
-            new TRegionRouteReq(broadcastTime, latestRegionRouteMap),
-            dataNodeLocationMap,
-            DataNodeRequestType.UPDATE_REGION_ROUTE_MAP,
-            null);
-    LOGGER.info("Broadcast the latest RegionRouteMap finished.");
-  }
-
-  /** loop body of the heartbeat thread */
-  private void heartbeatLoopBody() {
-    if (getConsensusManager().isLeader()) {
-      // Generate HeartbeatReq
-      THeartbeatReq heartbeatReq = genHeartbeatReq();
-      // Send heartbeat requests to all the registered DataNodes
-      pingRegisteredDataNodes(heartbeatReq, getNodeManager().getRegisteredDataNodes(-1));
-      // Send heartbeat requests to all the registered ConfigNodes
-      pingRegisteredConfigNodes(heartbeatReq, getNodeManager().getRegisteredConfigNodes());
-    }
-  }
-
-  private THeartbeatReq genHeartbeatReq() {
-    /* Generate heartbeat request */
-    THeartbeatReq heartbeatReq = new THeartbeatReq();
-    heartbeatReq.setHeartbeatTimestamp(System.currentTimeMillis());
-    // We update RegionGroups' leadership in every 5 heartbeat loop
-    heartbeatReq.setNeedJudgeLeader(heartbeatCounter.get() % 5 == 0);
-    // We sample DataNode's load in every 10 heartbeat loop
-    heartbeatReq.setNeedSamplingLoad(heartbeatCounter.get() % 10 == 0);
-
-    /* Update heartbeat counter */
-    heartbeatCounter.getAndUpdate((x) -> (x + 1) % 10);
-    return heartbeatReq;
+            }));
+    return result.get();
   }
 
   /**
-   * Send heartbeat requests to all the Registered DataNodes
+   * Wait for the specified RegionGroups to finish leader election
    *
-   * @param registeredDataNodes DataNodes that registered in cluster
+   * @param regionGroupIds Specified RegionGroupIds
    */
-  private void pingRegisteredDataNodes(
-      THeartbeatReq heartbeatReq, List<TDataNodeConfiguration> registeredDataNodes) {
-    // Send heartbeat requests
-    for (TDataNodeConfiguration dataNodeInfo : registeredDataNodes) {
-      DataNodeHeartbeatHandler handler =
-          new DataNodeHeartbeatHandler(
-              dataNodeInfo.getLocation(),
-              (DataNodeHeartbeatCache)
-                  nodeCacheMap.computeIfAbsent(
-                      dataNodeInfo.getLocation().getDataNodeId(),
-                      empty -> new DataNodeHeartbeatCache()),
-              regionGroupCacheMap);
-      AsyncDataNodeClientPool.getInstance()
-          .getDataNodeHeartBeat(
-              dataNodeInfo.getLocation().getInternalEndPoint(), heartbeatReq, handler);
-    }
+  public void waitForLeaderElection(List<TConsensusGroupId> regionGroupIds) {
+    loadCache.waitForLeaderElection(regionGroupIds);
   }
 
   /**
-   * Send heartbeat requests to all the Registered ConfigNodes
+   * Force update the specified RegionGroup's leader.
    *
-   * @param registeredConfigNodes ConfigNodes that registered in cluster
+   * @param regionGroupId Specified RegionGroupId
+   * @param leaderId Leader DataNodeId
    */
-  private void pingRegisteredConfigNodes(
-      THeartbeatReq heartbeatReq, List<TConfigNodeLocation> registeredConfigNodes) {
-    // Send heartbeat requests
-    for (TConfigNodeLocation configNodeLocation : registeredConfigNodes) {
-      if (configNodeLocation.getInternalEndPoint().equals(currentNode)) {
-        // Skip itself
-        nodeCacheMap.putIfAbsent(
-            configNodeLocation.getConfigNodeId(), new ConfigNodeHeartbeatCache(configNodeLocation));
-        continue;
-      }
-
-      ConfigNodeHeartbeatHandler handler =
-          new ConfigNodeHeartbeatHandler(
-              configNodeLocation,
-              (ConfigNodeHeartbeatCache)
-                  nodeCacheMap.computeIfAbsent(
-                      configNodeLocation.getConfigNodeId(),
-                      empty -> new ConfigNodeHeartbeatCache(configNodeLocation)));
-      AsyncConfigNodeClientPool.getInstance()
-          .getConfigNodeHeartBeat(
-              configNodeLocation.getInternalEndPoint(),
-              heartbeatReq.getHeartbeatTimestamp(),
-              handler);
-    }
+  public void forceUpdateRegionLeader(TConsensusGroupId regionGroupId, int leaderId) {
+    loadCache.forceUpdateRegionLeader(regionGroupId, leaderId);
   }
 
   /**
-   * When a node is removed, clear the node's cache
+   * Force update the specified RegionGroup's priority.
    *
-   * @param nodeId removed node id
+   * @param regionGroupId Specified RegionGroupId
+   * @param regionPriority Region route priority
    */
-  public void removeNodeHeartbeatHandCache(Integer nodeId) {
-    nodeCacheMap.remove(nodeId);
+  public void forceUpdateRegionPriority(
+      TConsensusGroupId regionGroupId, TRegionReplicaSet regionPriority) {
+    loadCache.forceUpdateRegionPriority(regionGroupId, regionPriority);
   }
 
-  public List<TConfigNodeLocation> getOnlineConfigNodes() {
-    return getNodeManager().getRegisteredConfigNodes().stream()
-        .filter(
-            registeredConfigNode ->
-                nodeCacheMap
-                    .get(registeredConfigNode.getConfigNodeId())
-                    .getNodeStatus()
-                    .equals(NodeStatus.Running))
-        .collect(Collectors.toList());
-  }
-
-  public List<TDataNodeConfiguration> getOnlineDataNodes(int dataNodeId) {
-    return getNodeManager().getRegisteredDataNodes(dataNodeId).stream()
-        .filter(
-            registeredDataNode ->
-                nodeCacheMap
-                    .get(registeredDataNode.getLocation().getDataNodeId())
-                    .getNodeStatus()
-                    .equals(NodeStatus.Running))
-        .collect(Collectors.toList());
-  }
-
-  public static void printRegionRouteMap(
-      long timestamp, Map<TConsensusGroupId, TRegionReplicaSet> regionRouteMap) {
-    LOGGER.info("[latestRegionRouteMap] timestamp:{}", timestamp);
-    LOGGER.info("[latestRegionRouteMap] RegionRouteMap:");
-    for (Map.Entry<TConsensusGroupId, TRegionReplicaSet> entry : regionRouteMap.entrySet()) {
-      LOGGER.info(
-          "[latestRegionRouteMap]\t {}={}",
-          entry.getKey(),
-          entry.getValue().getDataNodeLocations().stream()
-              .map(TDataNodeLocation::getDataNodeId)
-              .collect(Collectors.toList()));
-    }
-  }
-
-  private ConsensusManager getConsensusManager() {
-    return configManager.getConsensusManager();
-  }
-
-  private NodeManager getNodeManager() {
-    return configManager.getNodeManager();
-  }
-
-  private ClusterSchemaManager getClusterSchemaManager() {
-    return configManager.getClusterSchemaManager();
-  }
-
-  private PartitionManager getPartitionManager() {
-    return configManager.getPartitionManager();
-  }
-
-  public Map<Integer, INodeCache> getNodeCacheMap() {
-    return nodeCacheMap;
+  /**
+   * Remove the specified RegionGroup's route cache.
+   *
+   * @param regionGroupId Specified RegionGroupId
+   */
+  public void removeRegionRouteCache(TConsensusGroupId regionGroupId) {
+    loadCache.removeRegionRouteCache(regionGroupId);
   }
 }

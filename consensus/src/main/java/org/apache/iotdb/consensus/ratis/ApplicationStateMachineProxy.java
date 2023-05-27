@@ -18,11 +18,16 @@
  */
 package org.apache.iotdb.consensus.ratis;
 
+import org.apache.iotdb.common.rpc.thrift.TConsensusGroupType;
 import org.apache.iotdb.common.rpc.thrift.TSStatus;
+import org.apache.iotdb.commons.service.metric.PerformanceOverviewMetrics;
 import org.apache.iotdb.consensus.IStateMachine;
 import org.apache.iotdb.consensus.common.DataSet;
 import org.apache.iotdb.consensus.common.request.ByteBufferConsensusRequest;
 import org.apache.iotdb.consensus.common.request.IConsensusRequest;
+import org.apache.iotdb.consensus.ratis.metrics.RatisMetricsManager;
+import org.apache.iotdb.consensus.ratis.utils.Utils;
+import org.apache.iotdb.rpc.TSStatusCode;
 
 import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.proto.RaftProtos.RaftConfigurationProto;
@@ -44,22 +49,32 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 public class ApplicationStateMachineProxy extends BaseStateMachine {
-  private final Logger logger = LoggerFactory.getLogger(ApplicationStateMachineProxy.class);
-  private final IStateMachine applicationStateMachine;
 
-  // Raft Storage sub dir for statemachine data, default (_sm)
-  private File statemachineDir;
+  private static final Logger logger = LoggerFactory.getLogger(ApplicationStateMachineProxy.class);
+  private static final PerformanceOverviewMetrics PERFORMANCE_OVERVIEW_METRICS =
+      PerformanceOverviewMetrics.getInstance();
+  private final IStateMachine applicationStateMachine;
+  private final IStateMachine.RetryPolicy retryPolicy;
   private final SnapshotStorage snapshotStorage;
   private final RaftGroupId groupId;
+  private final TConsensusGroupType consensusGroupType;
 
   public ApplicationStateMachineProxy(IStateMachine stateMachine, RaftGroupId id) {
     applicationStateMachine = stateMachine;
-    snapshotStorage = new SnapshotStorage(applicationStateMachine);
-    applicationStateMachine.start();
     groupId = id;
+    retryPolicy =
+        applicationStateMachine instanceof IStateMachine.RetryPolicy
+            ? (IStateMachine.RetryPolicy) applicationStateMachine
+            : new IStateMachine.RetryPolicy() {};
+    snapshotStorage = new SnapshotStorage(applicationStateMachine, groupId);
+    consensusGroupType = Utils.getConsensusGroupTypeFromPrefix(groupId.toString());
+    applicationStateMachine.start();
   }
 
   @Override
@@ -69,7 +84,6 @@ public class ApplicationStateMachineProxy extends BaseStateMachine {
         .startAndTransition(
             () -> {
               snapshotStorage.init(storage);
-              this.statemachineDir = snapshotStorage.getStateMachineDir();
               loadSnapshot(snapshotStorage.findLatestSnapshotDir());
             });
   }
@@ -99,10 +113,12 @@ public class ApplicationStateMachineProxy extends BaseStateMachine {
 
   @Override
   public CompletableFuture<Message> applyTransaction(TransactionContext trx) {
+    boolean isLeader = false;
+    long writeToStateMachineStartTime = System.nanoTime();
     RaftProtos.LogEntryProto log = trx.getLogEntry();
     updateLastAppliedTermIndex(log.getTerm(), log.getIndex());
 
-    IConsensusRequest applicationRequest = null;
+    IConsensusRequest applicationRequest;
 
     // if this server is leader
     // it will first try to obtain applicationRequest from transaction context
@@ -110,22 +126,80 @@ public class ApplicationStateMachineProxy extends BaseStateMachine {
         && trx.getClientRequest().getMessage() instanceof RequestMessage) {
       RequestMessage requestMessage = (RequestMessage) trx.getClientRequest().getMessage();
       applicationRequest = requestMessage.getActualRequest();
+      isLeader = true;
     } else {
       applicationRequest =
           new ByteBufferConsensusRequest(
               log.getStateMachineLogEntry().getLogData().asReadOnlyByteBuffer());
     }
 
-    Message ret;
-    try {
-      TSStatus result = applicationStateMachine.write(applicationRequest);
-      ret = new ResponseMessage(result);
-    } catch (Exception rte) {
-      logger.error("application statemachine throws a runtime exception: ", rte);
-      ret = Message.valueOf("internal error. statemachine throws a runtime exception: " + rte);
-    }
+    Message ret = null;
+    waitUntilSystemAllowApply();
+    TSStatus finalStatus = null;
+    boolean shouldRetry = false;
+    boolean firstTry = true;
+    do {
+      try {
+        if (!firstTry) {
+          Thread.sleep(retryPolicy.getSleepTime());
+        }
+        IConsensusRequest deserializedRequest =
+            applicationStateMachine.deserializeRequest(applicationRequest);
 
+        TSStatus result = applicationStateMachine.write(deserializedRequest);
+
+        if (firstTry) {
+          finalStatus = result;
+          firstTry = false;
+        } else {
+          finalStatus = retryPolicy.updateResult(finalStatus, result);
+        }
+
+        shouldRetry = retryPolicy.shouldRetry(finalStatus);
+        if (!shouldRetry) {
+          ret = new ResponseMessage(finalStatus);
+          break;
+        }
+      } catch (InterruptedException i) {
+        logger.warn("{} interrupted when retry sleep", this);
+        Thread.currentThread().interrupt();
+      } catch (Throwable rte) {
+        logger.error("application statemachine throws a runtime exception: ", rte);
+        ret =
+            new ResponseMessage(
+                new TSStatus(TSStatusCode.INTERNAL_SERVER_ERROR.getStatusCode())
+                    .setMessage("internal error. statemachine throws a runtime exception: " + rte));
+        if (Utils.stallApply()) {
+          waitUntilSystemAllowApply();
+          shouldRetry = true;
+        } else {
+          break;
+        }
+      }
+    } while (shouldRetry);
+    if (isLeader) {
+      // only record time cost for data region in Performance Overview Dashboard
+      if (consensusGroupType == TConsensusGroupType.DataRegion) {
+        PERFORMANCE_OVERVIEW_METRICS.recordEngineCost(
+            System.nanoTime() - writeToStateMachineStartTime);
+      }
+      // statistic the time of write stateMachine
+      RatisMetricsManager.getInstance()
+          .recordWriteStateMachineCost(
+              System.nanoTime() - writeToStateMachineStartTime, consensusGroupType);
+    }
     return CompletableFuture.completedFuture(ret);
+  }
+
+  private void waitUntilSystemAllowApply() {
+    while (Utils.stallApply()) {
+      try {
+        TimeUnit.SECONDS.sleep(60);
+      } catch (InterruptedException e) {
+        logger.warn("{}: interrupted when waiting until system ready: {}", this, e);
+        Thread.currentThread().interrupt();
+      }
+    }
   }
 
   @Override
@@ -148,38 +222,59 @@ public class ApplicationStateMachineProxy extends BaseStateMachine {
     }
 
     // require the application statemachine to take the latest snapshot
-    String metadata = Utils.getMetadataFromTermIndex(lastApplied);
-    File snapshotDir = snapshotStorage.getSnapshotDir(metadata);
+    final String metadata = Utils.getMetadataFromTermIndex(lastApplied);
+    File snapshotTmpDir = snapshotStorage.getSnapshotTmpDir(metadata);
 
     // delete snapshotDir fully in case of last takeSnapshot() crashed
+    FileUtils.deleteFully(snapshotTmpDir);
+
+    snapshotTmpDir.mkdirs();
+    if (!snapshotTmpDir.isDirectory()) {
+      logger.error("Unable to create temp snapshotDir at {}", snapshotTmpDir);
+      return RaftLog.INVALID_LOG_INDEX;
+    }
+
+    boolean applicationTakeSnapshotSuccess =
+        applicationStateMachine.takeSnapshot(
+            snapshotTmpDir, snapshotStorage.getSnapshotTmpId(metadata), metadata);
+    if (!applicationTakeSnapshotSuccess) {
+      deleteIncompleteSnapshot(snapshotTmpDir);
+      return RaftLog.INVALID_LOG_INDEX;
+    }
+
+    File snapshotDir = snapshotStorage.getSnapshotDir(metadata);
+
     FileUtils.deleteFully(snapshotDir);
-
-    snapshotDir.mkdir();
-    if (!snapshotDir.isDirectory()) {
-      logger.error("Unable to create snapshotDir at {}", snapshotDir);
+    try {
+      Files.move(snapshotTmpDir.toPath(), snapshotDir.toPath(), StandardCopyOption.ATOMIC_MOVE);
+    } catch (IOException e) {
+      logger.error(
+          "{} atomic rename {} to {} failed with exception {}",
+          this,
+          snapshotTmpDir,
+          snapshotDir,
+          e);
+      deleteIncompleteSnapshot(snapshotTmpDir);
       return RaftLog.INVALID_LOG_INDEX;
     }
 
-    boolean applicationTakeSnapshotSuccess = applicationStateMachine.takeSnapshot(snapshotDir);
-    boolean addTermIndexMetafileSuccess =
-        snapshotStorage.addTermIndexMetaFile(snapshotDir, metadata);
+    snapshotStorage.updateSnapshotCache();
 
-    if (!applicationTakeSnapshotSuccess || !addTermIndexMetafileSuccess) {
-      // this takeSnapshot failed, clean up files and directories
-      // statemachine is supposed to clear snapshotDir on failure
-      boolean isEmpty = snapshotDir.delete();
-      if (!isEmpty) {
-        logger.warn(
-            "StateMachine take snapshot failed but leave unexpected remaining files at "
-                + snapshotDir.getAbsolutePath());
-        FileUtils.deleteFully(snapshotDir);
-      }
-      return RaftLog.INVALID_LOG_INDEX;
-    }
     return lastApplied.getIndex();
   }
 
+  private void deleteIncompleteSnapshot(File snapshotDir) throws IOException {
+    // this takeSnapshot failed, clean up files and directories
+    // statemachine is supposed to clear snapshotDir on failure
+    boolean isEmpty = snapshotDir.delete();
+    if (!isEmpty) {
+      logger.info("Snapshot directory is incomplete, deleting {}", snapshotDir.getAbsolutePath());
+      FileUtils.deleteFully(snapshotDir);
+    }
+  }
+
   private void loadSnapshot(File latestSnapshotDir) {
+    snapshotStorage.updateSnapshotCache();
     if (latestSnapshotDir == null) {
       return;
     }
@@ -201,7 +296,7 @@ public class ApplicationStateMachineProxy extends BaseStateMachine {
         .event()
         .notifyLeaderChanged(
             Utils.fromRaftGroupIdToConsensusGroupId(groupMemberId.getGroupId()),
-            Utils.formRaftPeerIdToTEndPoint(newLeaderId));
+            Utils.fromRaftPeerIdToNodeId(newLeaderId));
   }
 
   @Override

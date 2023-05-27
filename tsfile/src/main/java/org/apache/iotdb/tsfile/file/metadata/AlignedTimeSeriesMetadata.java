@@ -56,6 +56,14 @@ public class AlignedTimeSeriesMetadata implements ITimeSeriesMetadata {
     return v == null ? null : v.getStatistics();
   }
 
+  public List<Statistics> getValueStatisticsList() {
+    List<Statistics> valueStatisticsList = new ArrayList<>();
+    for (TimeseriesMetadata v : valueTimeseriesMetadataList) {
+      valueStatisticsList.add(v == null ? null : v.getStatistics());
+    }
+    return valueStatisticsList;
+  }
+
   public Statistics getTimeStatistics() {
     return timeseriesMetadata.getStatistics();
   }
@@ -103,6 +111,16 @@ public class AlignedTimeSeriesMetadata implements ITimeSeriesMetadata {
     return chunkMetadataLoader.loadChunkMetadataList(this);
   }
 
+  public List<AlignedChunkMetadata> getCopiedChunkMetadataList() {
+    List<IChunkMetadata> timeChunkMetadata = timeseriesMetadata.getCopiedChunkMetadataList();
+    List<List<IChunkMetadata>> valueChunkMetadataList = new ArrayList<>();
+    for (TimeseriesMetadata metadata : valueTimeseriesMetadataList) {
+      valueChunkMetadataList.add(metadata == null ? null : metadata.getCopiedChunkMetadataList());
+    }
+
+    return getAlignedChunkMetadata(timeChunkMetadata, valueChunkMetadataList);
+  }
+
   public List<AlignedChunkMetadata> getChunkMetadataList() {
     List<IChunkMetadata> timeChunkMetadata = timeseriesMetadata.getChunkMetadataList();
     List<List<IChunkMetadata>> valueChunkMetadataList = new ArrayList<>();
@@ -110,6 +128,11 @@ public class AlignedTimeSeriesMetadata implements ITimeSeriesMetadata {
       valueChunkMetadataList.add(metadata == null ? null : metadata.getChunkMetadataList());
     }
 
+    return getAlignedChunkMetadata(timeChunkMetadata, valueChunkMetadataList);
+  }
+
+  private List<AlignedChunkMetadata> getAlignedChunkMetadata(
+      List<IChunkMetadata> timeChunkMetadata, List<List<IChunkMetadata>> valueChunkMetadataList) {
     List<AlignedChunkMetadata> res = new ArrayList<>();
     for (int i = 0; i < timeChunkMetadata.size(); i++) {
       List<IChunkMetadata> chunkMetadataList = new ArrayList<>();

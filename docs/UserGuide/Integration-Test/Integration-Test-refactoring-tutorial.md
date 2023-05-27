@@ -51,7 +51,7 @@ Generally, there are three steps to finish the integration test, (1) constructin
 
 #### 1. Integration Test Class (IT Class) and Annotations
 
-When writing new IT classes, the developers are encouraged to create the new ones in the [integration-test](https://github.com/apache/iotdb/tree/master/integration-test) module. Except for the classes serving the other test cases, the classes containing integration tests to evaluate the functionality of IoTDB should be named "function"+"IT". For example, the test for auto-registration metadata in IoTDB is named “<font color=green>IoTDBAutoCreateSchema</font><font color=red>IT</font>”. 
+When writing new IT classes, the developers are encouraged to create the new ones in the [integration-test](https://github.com/apache/iotdb/tree/master/integration-test) module. Except for the classes serving the other test cases, the classes containing integration tests to evaluate the functionality of IoTDB should be named "function"+"IT". For example, the test for auto-registration metadata in IoTDB is named “<span style="color:green">IoTDBAutoCreateSchema</span><span style="color:red">IT</span>”. 
 
 - Category`` Annotation. **When creating new IT classes, the ```@Category``` should be introduced explicitly**, and the test environment should be specified by ```LocalStandaloneIT.class```, ```ClusterIT.class```, and ```RemoteIT.class```, which corresponds to the Local Standalone, Cluster and Remote environment respectively. **In general, ```LocalStandaloneIT.class``` and ```ClusterIT.class``` should both be included**.  Only in the case when some functionalities are only supported in the standalone version can we include   ```LocalStandaloneIT.class``` solely. 
 - RunWith Annotation. The ```@RunWith(IoTDBTestRunner.class)```  annotation should be included in every IT class. 
@@ -79,7 +79,7 @@ Preparations before the test include starting an IoTDB (single or cluster) insta
 The former means that this method is the first method executed for the IT class and is executed only once. The latter indicates that ```setUp()``` will be executed before each test method in the IT class. 
 
 - Please start IoTDB instance through the factor class, i.e., ```EnvFactory.getEnv().initBeforeClass()```.
-- Data preparation for the test includes registering storage groups, registering time series, and writing time series data as required by the test. It is recommended to implement a separate method within the IT class to prepare the data, such as ```insertData()```. 
+- Data preparation for the test includes registering databases, registering time series, and writing time series data as required by the test. It is recommended to implement a separate method within the IT class to prepare the data, such as ```insertData()```. 
 Please try to take advantage of the ```executeBatch()``` in JDBC or ```insertRecords()``` and ```insertTablets()``` in Session API if multiple statements or operations are to be executed. 
 
 ```java
@@ -108,7 +108,7 @@ public static void tearDown() throws Exception {
 
 #### 3. Implementing the logic of IT
 
-IT of Apache IoTDB should be implemented as black-box testing. Please name the method as "functionality"+"Test", e.g., "<font color=green>selectWithAlias</font><font color=red>Test</font>". The interaction should be implemented through JDBC or Session API. 
+IT of Apache IoTDB should be implemented as black-box testing. Please name the method as "functionality"+"Test", e.g., "<span style="color:green">selectWithAlias</span><span style="color:red">Test</span>". The interaction should be implemented through JDBC or Session API. 
 
 1 With JDBC
 
@@ -137,12 +137,12 @@ The sample code is as follows.
 public void exampleTest() throws Exception {
   try (Connection connection = EnvFactory.getEnv().getConnection();
       Statement statement = connection.createStatement()) {
-    // use execute() to set the storage groups
-    statement.execute("set storage group to root.sg");
-    // use executeQuery() query the storage groups
-    try (ResultSet resultSet = statement.executeQuery("show storage group")) {
+    // use execute() to set the databases
+    statement.execute("CREATE DATABASE root.sg");
+    // use executeQuery() query the databases
+    try (ResultSet resultSet = statement.executeQuery("SHOW DATABASES")) {
       if (resultSet.next()) {
-        String storageGroupPath = resultSet.getString("storage group");
+        String storageGroupPath = resultSet.getString("database");
         Assert.assertEquals("root.sg", storageGroupPath);
       } else {
         Assert.fail("This ResultSet is empty.");

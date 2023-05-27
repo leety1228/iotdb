@@ -21,11 +21,13 @@ package org.apache.iotdb.db.mpp.execution.operator.process.last;
 import org.apache.iotdb.db.mpp.execution.operator.Operator;
 import org.apache.iotdb.db.mpp.execution.operator.OperatorContext;
 import org.apache.iotdb.db.mpp.execution.operator.process.ProcessOperator;
+import org.apache.iotdb.tsfile.common.conf.TSFileDescriptor;
 import org.apache.iotdb.tsfile.read.common.block.TsBlock;
 import org.apache.iotdb.tsfile.read.common.block.TsBlockBuilder;
 import org.apache.iotdb.tsfile.utils.Binary;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import org.openjdk.jol.info.ClassLayout;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -39,6 +41,8 @@ import static org.apache.iotdb.db.mpp.execution.operator.process.last.LastQueryU
 // merge all last query result from different data regions, it will select max time for the same
 // time-series
 public class LastQueryMergeOperator implements ProcessOperator {
+
+  public static final long MAP_NODE_RETRAINED_SIZE = 16L + Location.INSTANCE_SIZE;
 
   private final OperatorContext operatorContext;
 
@@ -89,8 +93,9 @@ public class LastQueryMergeOperator implements ProcessOperator {
   public ListenableFuture<?> isBlocked() {
     List<ListenableFuture<?>> listenableFutures = new ArrayList<>();
     for (int i = 0; i < inputOperatorsCount; i++) {
-      if (!noMoreTsBlocks[i] && empty(i)) {
-        ListenableFuture<?> blocked = children.get(i).isBlocked();
+      Operator currentChild = children.get(i);
+      if (!noMoreTsBlocks[i] && empty(i) && currentChild != null) {
+        ListenableFuture<?> blocked = currentChild.isBlocked();
         if (!blocked.isDone()) {
           listenableFutures.add(blocked);
         }
@@ -100,7 +105,7 @@ public class LastQueryMergeOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
+  public TsBlock next() throws Exception {
 
     // end time series for returned TsBlock this time, it's the min/max end time series among all
     // the children
@@ -111,10 +116,11 @@ public class LastQueryMergeOperator implements ProcessOperator {
     // min/max TimeSeries
     // among all the input TsBlock as the current output TsBlock's endTimeSeries.
     for (int i = 0; i < inputOperatorsCount; i++) {
-      if (!noMoreTsBlocks[i] && empty(i)) {
-        if (children.get(i).hasNext()) {
+      Operator currentChild = children.get(i);
+      if (!noMoreTsBlocks[i] && empty(i) && currentChild != null) {
+        if (currentChild.hasNextWithTimer()) {
           inputIndex[i] = 0;
-          inputTsBlocks[i] = children.get(i).next();
+          inputTsBlocks[i] = currentChild.nextWithTimer();
           if (!empty(i)) {
             int rowSize = inputTsBlocks[i].getPositionCount();
             for (int row = 0; row < rowSize; row++) {
@@ -129,16 +135,20 @@ public class LastQueryMergeOperator implements ProcessOperator {
           } else {
             // child operator has next but return an empty TsBlock which means that it may not
             // finish calculation in given time slice.
-            // In such case, LastQueryMergeOperator can't go on calculating, so we just return null.
+            // In such case, LastQueryMergeOperator can't go on calculating, so we just return
+            // null.
             // We can also use the while loop here to continuously call the hasNext() and next()
             // methods of the child operator until its hasNext() returns false or the next() gets
-            // the data that is not empty, but this will cause the execution time of the while loop
+            // the data that is not empty, but this will cause the execution time of the while
+            // loop
             // to be uncontrollable and may exceed all allocated time slice
             return null;
           }
         } else { // no more tsBlock
           noMoreTsBlocks[i] = true;
           inputTsBlocks[i] = null;
+          currentChild.close();
+          children.set(i, null);
         }
       }
       // update the currentEndTimeSeries if the TsBlock is not empty
@@ -175,7 +185,7 @@ public class LastQueryMergeOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean hasNext() {
+  public boolean hasNext() throws Exception {
     if (finished) {
       return false;
     }
@@ -183,11 +193,16 @@ public class LastQueryMergeOperator implements ProcessOperator {
       if (!empty(i)) {
         return true;
       } else if (!noMoreTsBlocks[i]) {
-        if (children.get(i).hasNext()) {
+        Operator currentChild = children.get(i);
+        if (currentChild != null && currentChild.hasNextWithTimer()) {
           return true;
         } else {
           noMoreTsBlocks[i] = true;
           inputTsBlocks[i] = null;
+          if (currentChild != null) {
+            currentChild.close();
+            children.set(i, null);
+          }
         }
       }
     }
@@ -197,13 +212,15 @@ public class LastQueryMergeOperator implements ProcessOperator {
   @Override
   public void close() throws Exception {
     for (Operator child : children) {
-      child.close();
+      if (child != null) {
+        child.close();
+      }
     }
     tsBlockBuilder = null;
   }
 
   @Override
-  public boolean isFinished() {
+  public boolean isFinished() throws Exception {
     if (finished) {
       return true;
     }
@@ -217,6 +234,47 @@ public class LastQueryMergeOperator implements ProcessOperator {
       }
     }
     return finished;
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    long maxPeekMemory = 0;
+    long childrenMaxPeekMemory = 0;
+    for (Operator child : children) {
+      childrenMaxPeekMemory =
+          Math.max(childrenMaxPeekMemory, maxPeekMemory + child.calculateMaxPeekMemory());
+      maxPeekMemory +=
+          (child.calculateMaxReturnSize() + child.calculateRetainedSizeAfterCallingNext());
+    }
+    // result size + cached TreeMap size
+    maxPeekMemory +=
+        (calculateMaxReturnSize()
+            + TSFileDescriptor.getInstance().getConfig().getMaxTsBlockLineNumber()
+                * MAP_NODE_RETRAINED_SIZE);
+    return Math.max(maxPeekMemory, childrenMaxPeekMemory);
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    long maxReturnSize = 0;
+    for (Operator child : children) {
+      maxReturnSize = Math.max(maxReturnSize, child.calculateMaxReturnSize());
+    }
+    return maxReturnSize;
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    long childrenSum = 0, minChildReturnSize = Long.MAX_VALUE;
+    for (Operator child : children) {
+      long maxReturnSize = child.calculateMaxReturnSize();
+      childrenSum += (maxReturnSize + child.calculateRetainedSizeAfterCallingNext());
+      minChildReturnSize = Math.min(minChildReturnSize, maxReturnSize);
+    }
+    // max cached TsBlock + cached TreeMap size
+    return (childrenSum - minChildReturnSize)
+        + TSFileDescriptor.getInstance().getConfig().getMaxTsBlockLineNumber()
+            * MAP_NODE_RETRAINED_SIZE;
   }
 
   /**
@@ -241,6 +299,8 @@ public class LastQueryMergeOperator implements ProcessOperator {
   }
 
   private static class Location {
+
+    private static final int INSTANCE_SIZE = ClassLayout.parseClass(Location.class).instanceSize();
     int tsBlockIndex;
     int rowIndex;
 

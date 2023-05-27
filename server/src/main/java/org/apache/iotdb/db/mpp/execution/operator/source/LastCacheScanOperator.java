@@ -41,20 +41,35 @@ public class LastCacheScanOperator implements SourceOperator {
   }
 
   @Override
-  public TsBlock next() {
+  public TsBlock next() throws Exception {
     TsBlock res = tsBlock;
     tsBlock = null;
     return res;
   }
 
   @Override
-  public boolean hasNext() {
+  public boolean hasNext() throws Exception {
     return tsBlock != null && !tsBlock.isEmpty();
   }
 
   @Override
-  public boolean isFinished() {
-    return !hasNext();
+  public boolean isFinished() throws Exception {
+    return !hasNextWithTimer();
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    return tsBlock.getRetainedSizeInBytes();
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    return tsBlock.getRetainedSizeInBytes();
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    return 0L;
   }
 
   @Override

@@ -42,13 +42,12 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.apache.iotdb.consensus.multileader.wal.ConsensusReqReader.DEFAULT_SEARCH_INDEX;
+import static org.apache.iotdb.consensus.iot.wal.ConsensusReqReader.DEFAULT_SEARCH_INDEX;
 
 /** This task is responsible for the recovery of one wal node. */
 public class WALNodeRecoverTask implements Runnable {
@@ -94,9 +93,7 @@ public class WALNodeRecoverTask implements Runnable {
       }
     }
 
-    if (!config
-        .getDataRegionConsensusProtocolClass()
-        .equals(ConsensusFactory.MultiLeaderConsensus)) {
+    if (!config.getDataRegionConsensusProtocolClass().equals(ConsensusFactory.IOT_CONSENSUS)) {
       // delete this wal node folder
       FileUtils.deleteDirectory(logDirectory);
       logger.info(
@@ -112,10 +109,6 @@ public class WALNodeRecoverTask implements Runnable {
       long[] indexInfo = recoverLastFile();
       long lastVersionId = indexInfo[0];
       long lastSearchIndex = indexInfo[1];
-      // update disk usage
-      long totalSize =
-          Arrays.stream(WALFileUtils.listAllWALFiles(logDirectory)).mapToLong(File::length).sum();
-      WALManager.getInstance().addTotalDiskUsage(totalSize);
       // register wal node
       WALManager.getInstance()
           .registerWALNode(
@@ -141,7 +134,7 @@ public class WALNodeRecoverTask implements Runnable {
     long lastSearchIndex = WALFileUtils.parseStartSearchIndex(lastWALFile.getName());
     WALMetaData metaData = new WALMetaData(lastSearchIndex, new ArrayList<>());
     WALFileStatus fileStatus = WALFileStatus.CONTAINS_NONE_SEARCH_INDEX;
-    try (WALReader walReader = new WALReader(lastWALFile)) {
+    try (WALReader walReader = new WALReader(lastWALFile, true)) {
       while (walReader.hasNext()) {
         WALEntry walEntry = walReader.next();
         long searchIndex = DEFAULT_SEARCH_INDEX;
@@ -199,9 +192,8 @@ public class WALNodeRecoverTask implements Runnable {
     for (MemTableInfo memTableInfo : memTableId2Info.values()) {
       firstValidVersionId = Math.min(firstValidVersionId, memTableInfo.getFirstFileVersionId());
 
-      File tsFile = new File(memTableInfo.getTsFilePath());
       UnsealedTsFileRecoverPerformer recoverPerformer =
-          walRecoverManger.removeRecoverPerformer(tsFile.getAbsolutePath());
+          walRecoverManger.removeRecoverPerformer(new File(memTableInfo.getTsFilePath()));
       if (recoverPerformer != null) {
         memTableId2RecoverPerformer.put(memTableInfo.getMemTableId(), recoverPerformer);
       }
@@ -227,13 +219,16 @@ public class WALNodeRecoverTask implements Runnable {
                 WALFileUtils.walFilenameFilter(dir, name)
                     && WALFileUtils.parseVersionId(name) >= firstValidVersionId);
     if (walFiles == null) {
+      endRecovery();
       return;
     }
     // asc sort by version id
     WALFileUtils.ascSortByVersionId(walFiles);
     // read .wal files and redo logs
-    for (File walFile : walFiles) {
-      try (WALReader walReader = new WALReader(walFile)) {
+    for (int i = 0; i < walFiles.length; ++i) {
+      File walFile = walFiles[i];
+      // last wal file may corrupt
+      try (WALReader walReader = new WALReader(walFile, i == walFiles.length - 1)) {
         while (walReader.hasNext()) {
           WALEntry walEntry = walReader.next();
           if (!memTableId2Info.containsKey(walEntry.getMemTableId())) {
@@ -253,6 +248,10 @@ public class WALNodeRecoverTask implements Runnable {
         logger.warn("Fail to read wal logs from {}, skip them", walFile, e);
       }
     }
+    endRecovery();
+  }
+
+  private void endRecovery() {
     // end recovering all recover performers
     for (UnsealedTsFileRecoverPerformer recoverPerformer : memTableId2RecoverPerformer.values()) {
       try {

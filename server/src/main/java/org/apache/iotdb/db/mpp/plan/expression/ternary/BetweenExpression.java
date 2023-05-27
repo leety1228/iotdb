@@ -21,17 +21,9 @@
 
 package org.apache.iotdb.db.mpp.plan.expression.ternary;
 
-import org.apache.iotdb.db.mpp.plan.analyze.TypeProvider;
 import org.apache.iotdb.db.mpp.plan.expression.Expression;
 import org.apache.iotdb.db.mpp.plan.expression.ExpressionType;
-import org.apache.iotdb.db.mpp.transformation.api.LayerPointReader;
-import org.apache.iotdb.db.mpp.transformation.dag.column.ColumnTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.column.ternary.BetweenColumnTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.column.ternary.TernaryColumnTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.transformer.ternary.BetweenTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.transformer.ternary.TernaryTransformer;
-import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
-import org.apache.iotdb.tsfile.read.common.type.Type;
+import org.apache.iotdb.db.mpp.plan.expression.visitor.ExpressionVisitor;
 import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
 
 import java.io.DataOutputStream;
@@ -66,46 +58,8 @@ public class BetweenExpression extends TernaryExpression {
   }
 
   @Override
-  protected TernaryTransformer constructTransformer(
-      LayerPointReader firstParentLayerPointReader,
-      LayerPointReader secondParentLayerPointReader,
-      LayerPointReader thirdParentLayerPointReader) {
-    return new BetweenTransformer(
-        firstParentLayerPointReader,
-        secondParentLayerPointReader,
-        thirdParentLayerPointReader,
-        isNotBetween);
-  }
-
-  @Override
-  protected TernaryColumnTransformer getConcreteTernaryTransformer(
-      ColumnTransformer firstColumnTransformer,
-      ColumnTransformer secondColumnTransformer,
-      ColumnTransformer thirdColumnTransformer,
-      Type returnType) {
-    return new BetweenColumnTransformer(
-        returnType,
-        firstColumnTransformer,
-        secondColumnTransformer,
-        thirdColumnTransformer,
-        isNotBetween);
-  }
-
-  @Override
   protected String operator() {
     return "between";
-  }
-
-  @Override
-  public TSDataType inferTypes(TypeProvider typeProvider) {
-    final String expressionString = toString();
-    if (!typeProvider.containsTypeInfoOf(expressionString)) {
-      firstExpression.inferTypes(typeProvider);
-      secondExpression.inferTypes(typeProvider);
-      thirdExpression.inferTypes(typeProvider);
-      typeProvider.setType(expressionString, TSDataType.BOOLEAN);
-    }
-    return TSDataType.BOOLEAN;
   }
 
   @Override
@@ -118,6 +72,7 @@ public class BetweenExpression extends TernaryExpression {
     return ExpressionType.BETWEEN;
   }
 
+  @Override
   protected void serialize(ByteBuffer byteBuffer) {
     super.serialize(byteBuffer);
     ReadWriteIOUtils.write(isNotBetween, byteBuffer);
@@ -129,7 +84,17 @@ public class BetweenExpression extends TernaryExpression {
     ReadWriteIOUtils.write(isNotBetween, stream);
   }
 
-  public Expression getExpression() {
-    return this;
+  @Override
+  public String getStringWithViewOfThisExpressionInternal() {
+    return firstExpression.getStringWithViewOfThisExpression()
+        + " BETWEEN "
+        + secondExpression.getStringWithViewOfThisExpression()
+        + " AND "
+        + thirdExpression.getStringWithViewOfThisExpression();
+  }
+
+  @Override
+  public <R, C> R accept(ExpressionVisitor<R, C> visitor, C context) {
+    return visitor.visitBetweenExpression(this, context);
   }
 }

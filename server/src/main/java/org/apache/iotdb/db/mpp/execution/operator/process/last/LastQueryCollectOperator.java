@@ -60,29 +60,61 @@ public class LastQueryCollectOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
-    if (children.get(currentIndex).hasNext()) {
-      return children.get(currentIndex).next();
+  public TsBlock next() throws Exception {
+    if (children.get(currentIndex).hasNextWithTimer()) {
+      return children.get(currentIndex).nextWithTimer();
     } else {
+      children.get(currentIndex).close();
+      children.set(currentIndex, null);
       currentIndex++;
       return null;
     }
   }
 
   @Override
-  public boolean hasNext() {
+  public boolean hasNext() throws Exception {
     return currentIndex < inputOperatorsCount;
   }
 
   @Override
   public void close() throws Exception {
     for (Operator child : children) {
-      child.close();
+      if (child != null) {
+        child.close();
+      }
     }
   }
 
   @Override
-  public boolean isFinished() {
-    return !hasNext();
+  public boolean isFinished() throws Exception {
+    return !hasNextWithTimer();
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    long maxPeekMemory = 0;
+    for (Operator child : children) {
+      maxPeekMemory = Math.max(maxPeekMemory, child.calculateMaxPeekMemory());
+      maxPeekMemory = Math.max(maxPeekMemory, child.calculateRetainedSizeAfterCallingNext());
+    }
+    return maxPeekMemory;
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    long maxReturnMemory = 0;
+    for (Operator child : children) {
+      maxReturnMemory = Math.max(maxReturnMemory, child.calculateMaxReturnSize());
+    }
+    return maxReturnMemory;
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    long sum = 0;
+    for (Operator operator : children) {
+      sum += operator.calculateRetainedSizeAfterCallingNext();
+    }
+    return sum;
   }
 }

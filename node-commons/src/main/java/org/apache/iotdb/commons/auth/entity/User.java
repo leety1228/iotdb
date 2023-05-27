@@ -19,6 +19,7 @@
 package org.apache.iotdb.commons.auth.entity;
 
 import org.apache.iotdb.commons.auth.AuthException;
+import org.apache.iotdb.commons.path.PartialPath;
 import org.apache.iotdb.commons.utils.AuthUtils;
 import org.apache.iotdb.commons.utils.SerializeUtils;
 
@@ -38,6 +39,7 @@ public class User {
   private String password;
   private List<PathPrivilege> privilegeList;
   private List<String> roleList;
+  private boolean isOpenIdUser = false; // default NO openIdUser
 
   private boolean useWaterMark = false; // default NO watermark
 
@@ -104,15 +106,15 @@ public class User {
     this.lastActiveTime = lastActiveTime;
   }
 
-  public boolean hasPrivilege(String path, int privilegeId) {
+  public boolean hasPrivilege(PartialPath path, int privilegeId) {
     return AuthUtils.hasPrivilege(path, privilegeId, privilegeList);
   }
 
-  public void addPrivilege(String path, int privilegeId) {
+  public void addPrivilege(PartialPath path, int privilegeId) {
     AuthUtils.addPrivilege(path, privilegeId, privilegeList);
   }
 
-  public void removePrivilege(String path, int privilegeId) {
+  public void removePrivilege(PartialPath path, int privilegeId) {
     AuthUtils.removePrivilege(path, privilegeId, privilegeList);
   }
 
@@ -122,7 +124,7 @@ public class User {
    * @param path -path
    * @param privileges -set of integer to determine privilege
    */
-  public void setPrivileges(String path, Set<Integer> privileges) {
+  public void setPrivileges(PartialPath path, Set<Integer> privileges) {
     for (PathPrivilege pathPrivilege : privilegeList) {
       if (pathPrivilege.getPath().equals(path)) {
         pathPrivilege.setPrivileges(privileges);
@@ -134,11 +136,11 @@ public class User {
     return roleList.contains(roleName);
   }
 
-  public Set<Integer> getPrivileges(String path) throws AuthException {
+  public Set<Integer> getPrivileges(PartialPath path) throws AuthException {
     return AuthUtils.getPrivileges(path, privilegeList);
   }
 
-  public boolean checkPrivilege(String path, int privilegeId) throws AuthException {
+  public boolean checkPrivilege(PartialPath path, int privilegeId) throws AuthException {
     return AuthUtils.checkPrivilege(path, privilegeId, privilegeList);
   }
 
@@ -164,7 +166,7 @@ public class User {
 
   @Override
   public int hashCode() {
-    return Objects.hash(name, password, privilegeList, roleList, lastActiveTime);
+    return Objects.hash(name, password, privilegeList, roleList, lastActiveTime, isOpenIdUser);
   }
 
   public boolean isUseWaterMark() {
@@ -173,6 +175,14 @@ public class User {
 
   public void setUseWaterMark(boolean useWaterMark) {
     this.useWaterMark = useWaterMark;
+  }
+
+  public boolean isOpenIdUser() {
+    return isOpenIdUser;
+  }
+
+  public void setOpenIdUser(boolean openIdUser) {
+    isOpenIdUser = openIdUser;
   }
 
   public ByteBuffer serialize() {
@@ -223,6 +233,8 @@ public class User {
         + privilegeList
         + ", roleList="
         + roleList
+        + ", isOpenIdUser="
+        + isOpenIdUser
         + ", useWaterMark="
         + useWaterMark
         + ", lastActiveTime="

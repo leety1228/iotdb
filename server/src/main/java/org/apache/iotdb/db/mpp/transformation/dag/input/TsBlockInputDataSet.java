@@ -50,15 +50,15 @@ public class TsBlockInputDataSet implements IUDFInputDataSet {
   }
 
   @Override
-  public YieldableState canYieldNextRowInObjects() {
+  public YieldableState canYieldNextRowInObjects() throws Exception {
     if (tsBlockRowIterator == null) {
       if (operator.isBlocked() != Operator.NOT_BLOCKED) {
         return YieldableState.NOT_YIELDABLE_WAITING_FOR_DATA;
       }
-      if (!operator.hasNext()) {
+      if (!operator.hasNextWithTimer()) {
         return YieldableState.NOT_YIELDABLE_NO_MORE_DATA;
       }
-      final TsBlock tsBlock = operator.next();
+      final TsBlock tsBlock = operator.nextWithTimer();
       if (tsBlock == null) {
         return YieldableState.NOT_YIELDABLE_WAITING_FOR_DATA;
       }
@@ -72,7 +72,7 @@ public class TsBlockInputDataSet implements IUDFInputDataSet {
       if (operator.isBlocked() != Operator.NOT_BLOCKED) {
         return YieldableState.NOT_YIELDABLE_WAITING_FOR_DATA;
       }
-      return operator.hasNext()
+      return operator.hasNextWithTimer()
           ? YieldableState.NOT_YIELDABLE_WAITING_FOR_DATA
           : YieldableState.NOT_YIELDABLE_NO_MORE_DATA;
     }

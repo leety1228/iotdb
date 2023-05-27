@@ -21,6 +21,7 @@ package org.apache.iotdb.db.wal;
 import org.apache.iotdb.commons.concurrent.IoTDBThreadPoolFactory;
 import org.apache.iotdb.commons.concurrent.ThreadName;
 import org.apache.iotdb.commons.concurrent.threadpool.ScheduledExecutorUtil;
+import org.apache.iotdb.commons.conf.IoTDBConstant;
 import org.apache.iotdb.commons.exception.StartupException;
 import org.apache.iotdb.commons.service.IService;
 import org.apache.iotdb.commons.service.ServiceType;
@@ -28,6 +29,8 @@ import org.apache.iotdb.commons.utils.TestOnly;
 import org.apache.iotdb.consensus.ConsensusFactory;
 import org.apache.iotdb.db.conf.IoTDBConfig;
 import org.apache.iotdb.db.conf.IoTDBDescriptor;
+import org.apache.iotdb.db.service.metrics.WritingMetrics;
+import org.apache.iotdb.db.wal.allocation.ElasticStrategy;
 import org.apache.iotdb.db.wal.allocation.FirstCreateStrategy;
 import org.apache.iotdb.db.wal.allocation.NodeAllocationStrategy;
 import org.apache.iotdb.db.wal.allocation.RoundRobinStrategy;
@@ -50,8 +53,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public class WALManager implements IService {
   private static final Logger logger = LoggerFactory.getLogger(WALManager.class);
   private static final IoTDBConfig config = IoTDBDescriptor.getInstance().getConfig();
-  private static final int MAX_WAL_NODE_NUM =
-      config.getMaxWalNodesNum() > 0 ? config.getMaxWalNodesNum() : config.getWalDirs().length * 2;
 
   /** manage all wal nodes and decide how to allocate them */
   private final NodeAllocationStrategy walNodesManager;
@@ -59,16 +60,26 @@ public class WALManager implements IService {
   private ScheduledExecutorService walDeleteThread;
   /** total disk usage of wal files */
   private final AtomicLong totalDiskUsage = new AtomicLong();
+  /** total number of wal files */
+  private final AtomicLong totalFileNum = new AtomicLong();
 
   private WALManager() {
     if (config.isClusterMode()
-        && config
-            .getDataRegionConsensusProtocolClass()
-            .equals(ConsensusFactory.MultiLeaderConsensus)) {
+        && config.getDataRegionConsensusProtocolClass().equals(ConsensusFactory.IOT_CONSENSUS)) {
       walNodesManager = new FirstCreateStrategy();
+    } else if (config.getMaxWalNodesNum() == 0) {
+      walNodesManager = new ElasticStrategy();
     } else {
-      walNodesManager = new RoundRobinStrategy(MAX_WAL_NODE_NUM);
+      walNodesManager = new RoundRobinStrategy(config.getMaxWalNodesNum());
     }
+  }
+
+  public static String getApplicantUniqueId(String storageGroupName, boolean sequence) {
+    return config.getDataRegionConsensusProtocolClass().equals(ConsensusFactory.IOT_CONSENSUS)
+        ? storageGroupName
+        : storageGroupName
+            + IoTDBConstant.FILE_NAME_SEPARATOR
+            + (sequence ? "sequence" : "unsequence");
   }
 
   /** Apply for a wal node */
@@ -80,33 +91,30 @@ public class WALManager implements IService {
     return walNodesManager.applyForWALNode(applicantUniqueId);
   }
 
-  /** WAL node will be registered only when using multi-leader consensus protocol */
+  /** WAL node will be registered only when using iot consensus protocol */
   public void registerWALNode(
       String applicantUniqueId, String logDirectory, long startFileVersion, long startSearchIndex) {
-    String s = config.getDataRegionConsensusProtocolClass();
     if (config.getWalMode() == WALMode.DISABLE
         || !config.isClusterMode()
-        || !config
-            .getDataRegionConsensusProtocolClass()
-            .equals(ConsensusFactory.MultiLeaderConsensus)) {
+        || !config.getDataRegionConsensusProtocolClass().equals(ConsensusFactory.IOT_CONSENSUS)) {
       return;
     }
 
     ((FirstCreateStrategy) walNodesManager)
         .registerWALNode(applicantUniqueId, logDirectory, startFileVersion, startSearchIndex);
+    WritingMetrics.getInstance().createWALNodeInfoMetrics(applicantUniqueId);
   }
 
-  /** WAL node will be deleted only when using multi-leader consensus protocol */
+  /** WAL node will be deleted only when using iot consensus protocol */
   public void deleteWALNode(String applicantUniqueId) {
     if (config.getWalMode() == WALMode.DISABLE
         || !config.isClusterMode()
-        || !config
-            .getDataRegionConsensusProtocolClass()
-            .equals(ConsensusFactory.MultiLeaderConsensus)) {
+        || !config.getDataRegionConsensusProtocolClass().equals(ConsensusFactory.IOT_CONSENSUS)) {
       return;
     }
 
     ((FirstCreateStrategy) walNodesManager).deleteWALNode(applicantUniqueId);
+    WritingMetrics.getInstance().removeWALNodeInfoMetrics(applicantUniqueId);
   }
 
   @Override
@@ -167,8 +175,29 @@ public class WALManager implements IService {
     }
   }
 
+  /** Wait until all write-ahead logs are flushed */
+  public void waitAllWALFlushed() {
+    if (config.getWalMode() == WALMode.DISABLE) {
+      return;
+    }
+
+    for (WALNode walNode : walNodesManager.getNodesSnapshot()) {
+      while (!walNode.isAllWALEntriesConsumed()) {
+        try {
+          Thread.sleep(50);
+        } catch (InterruptedException e) {
+          logger.error("Interrupted when waiting for all write-ahead logs flushed.");
+        }
+      }
+    }
+  }
+
   public long getTotalDiskUsage() {
     return totalDiskUsage.get();
+  }
+
+  public long getWALNodesNum() {
+    return walNodesManager.getNodesNum();
   }
 
   public void addTotalDiskUsage(long size) {
@@ -177,6 +206,18 @@ public class WALManager implements IService {
 
   public void subtractTotalDiskUsage(long size) {
     totalDiskUsage.accumulateAndGet(size, (x, y) -> x - y);
+  }
+
+  public long getTotalFileNum() {
+    return totalFileNum.get();
+  }
+
+  public void addTotalFileNum(long num) {
+    totalFileNum.accumulateAndGet(num, Long::sum);
+  }
+
+  public void subtractTotalFileNum(long num) {
+    totalFileNum.accumulateAndGet(num, (x, y) -> x - y);
   }
 
   @Override

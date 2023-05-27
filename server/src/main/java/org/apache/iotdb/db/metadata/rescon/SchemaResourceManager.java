@@ -20,29 +20,23 @@
 package org.apache.iotdb.db.metadata.rescon;
 
 import org.apache.iotdb.db.conf.IoTDBDescriptor;
-import org.apache.iotdb.db.metadata.mtree.store.disk.MTreeFlushTaskManager;
-import org.apache.iotdb.db.metadata.mtree.store.disk.MTreeReleaseTaskManager;
-import org.apache.iotdb.db.metadata.mtree.store.disk.memcontrol.MemManagerHolder;
+import org.apache.iotdb.db.metadata.mtree.store.disk.cache.CacheMemoryManager;
 import org.apache.iotdb.db.metadata.schemaregion.SchemaEngineMode;
 
 public class SchemaResourceManager {
 
   private SchemaResourceManager() {}
 
-  public static void initSchemaResource() {
-    TimeseriesStatistics.getInstance().init();
-    MemoryStatistics.getInstance().init();
+  public static void initSchemaResource(ISchemaEngineStatistics engineStatistics) {
     if (IoTDBDescriptor.getInstance()
         .getConfig()
         .getSchemaEngineMode()
         .equals(SchemaEngineMode.Schema_File.toString())) {
-      initSchemaFileModeResource();
+      initSchemaFileModeResource(engineStatistics);
     }
   }
 
   public static void clearSchemaResource() {
-    TimeseriesStatistics.getInstance().clear();
-    MemoryStatistics.getInstance().clear();
     if (IoTDBDescriptor.getInstance()
         .getConfig()
         .getSchemaEngineMode()
@@ -51,17 +45,11 @@ public class SchemaResourceManager {
     }
   }
 
-  private static void initSchemaFileModeResource() {
-    MemManagerHolder.initMemManagerInstance();
-    MemManagerHolder.getMemManagerInstance().init();
-    MTreeFlushTaskManager.getInstance().init();
-    MTreeReleaseTaskManager.getInstance().init();
+  private static void initSchemaFileModeResource(ISchemaEngineStatistics engineStatistics) {
+    CacheMemoryManager.getInstance().init(engineStatistics);
   }
 
   private static void clearSchemaFileModeResource() {
-    MemManagerHolder.getMemManagerInstance().clear();
-    // the release task may submit flush task, thus must be shut down and clear first
-    MTreeReleaseTaskManager.getInstance().clear();
-    MTreeFlushTaskManager.getInstance().clear();
+    CacheMemoryManager.getInstance().clear();
   }
 }

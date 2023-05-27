@@ -86,6 +86,15 @@ public class TsFileValidationTool {
   private static final List<File> fileList = new ArrayList<>();
   public static int badFileNum = 0;
 
+  // measurementID -> <fileName, [lastTime, endTimeInLastFile]>
+  private static final Map<String, Pair<String, long[]>> measurementLastTime = new HashMap<>();
+
+  // deviceID -> <fileName, endTime>, the endTime of device in the last seq file
+  private static final Map<String, Pair<String, Long>> deviceEndTime = new HashMap<>();
+
+  // fileName -> isBadFile
+  private static final Map<String, Boolean> isBadFileMap = new HashMap<>();
+
   /**
    * The form of param is: [path of data dir or tsfile] [-pd = print details or not] [-f = path of
    * outFile]. Eg: xxx/iotdb/data/data1 xxx/xxx.tsfile -pd=true -f=xxx/TsFile_validation_view.txt
@@ -121,7 +130,7 @@ public class TsFileValidationTool {
           continue;
         }
         if (printDetails) {
-          printBoth("- Check files in storage group: " + sgDir.getAbsolutePath());
+          printBoth("- Check files in database: " + sgDir.getAbsolutePath());
         }
         // get data region dirs
         File[] dataRegionDirs = sgDir.listFiles();
@@ -149,12 +158,22 @@ public class TsFileValidationTool {
                             file -> file.getName().endsWith(TSFILE_SUFFIX))));
             // sort the seq files with timestamp
             tsFiles.sort(
-                (f1, f2) ->
-                    Long.compareUnsigned(
-                        Long.parseLong(f1.getName().split("-")[0]),
-                        Long.parseLong(f2.getName().split("-")[0])));
+                (f1, f2) -> {
+                  int timeDiff =
+                      Long.compareUnsigned(
+                          Long.parseLong(f1.getName().split("-")[0]),
+                          Long.parseLong(f2.getName().split("-")[0]));
+                  return timeDiff == 0
+                      ? Long.compareUnsigned(
+                          Long.parseLong(f1.getName().split("-")[1]),
+                          Long.parseLong(f2.getName().split("-")[1]))
+                      : timeDiff;
+                });
+
             findUncorrectFiles(tsFiles);
           }
+          // clear map
+          clearMap(false);
         }
       }
     }
@@ -167,13 +186,6 @@ public class TsFileValidationTool {
   }
 
   public static void findUncorrectFiles(List<File> tsFiles) {
-    // measurementID -> <fileName, [lastTime, endTimeInLastFile]>
-    Map<String, Pair<String, long[]>> measurementLastTime = new HashMap<>();
-    // deviceID -> <fileName, endTime>, the endTime of device in the last seq file
-    Map<String, Pair<String, Long>> deviceEndTime = new HashMap<>();
-    // fileName -> isBadFile
-    Map<String, Boolean> isBadFileMap = new HashMap<>();
-
     for (File tsFile : tsFiles) {
       List<String> previousBadFileMsgs = new ArrayList<>();
       try {
@@ -513,7 +525,6 @@ public class TsFileValidationTool {
           isBadFileMap.put(tsFile.getName(), true);
           badFileNum++;
         }
-
       } finally {
         for (String msg : previousBadFileMsgs) {
           printBoth(msg);
@@ -522,7 +533,7 @@ public class TsFileValidationTool {
     }
   }
 
-  public static boolean checkArgs(String[] args) {
+  private static boolean checkArgs(String[] args) {
     if (args.length < 1) {
       System.out.println(
           "Please input correct param, which is [path of data dir] [-pd = print details or not] [-f = path of outFile]. Eg: xxx/iotdb/data/data -pd=true -f=xxx/TsFile_validation_view.txt");
@@ -553,13 +564,22 @@ public class TsFileValidationTool {
           }
         }
       }
-      if (seqDataDirList.size() == 0 && fileList.size() == 0) {
+      if (seqDataDirList.isEmpty() && fileList.isEmpty()) {
         System.out.println(
             "Please input correct param, which is [path of data dir] [-pd = print details or not] [-f = path of outFile]. Eg: xxx/iotdb/data/data -pd=true -f=xxx/TsFile_validation_view.txt");
         return false;
       }
       return true;
     }
+  }
+
+  public static void clearMap(boolean resetBadFileNum) {
+    if (resetBadFileNum) {
+      badFileNum = 0;
+    }
+    measurementLastTime.clear();
+    deviceEndTime.clear();
+    isBadFileMap.clear();
   }
 
   private static boolean checkIsDirectory(File dir) {

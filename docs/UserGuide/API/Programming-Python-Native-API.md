@@ -57,7 +57,28 @@ session.close()
 * Initialize a Session
 
 ```python
-session = Session(ip, port_, username_, password_, fetch_size=1024, zone_id="UTC+8")
+session = Session(
+    ip="127.0.0.1",
+    port="6667",
+    user="root",
+    password="root",
+    fetch_size=1024,
+    zone_id="UTC+8",
+    enable_redirection=True
+)
+```
+
+* Initialize a Session to connect multiple nodes
+
+```python
+session = Session.init_from_node_urls(
+    node_urls=["127.0.0.1:6667", "127.0.0.1:6668", "127.0.0.1:6669"],
+    user="root",
+    password="root",
+    fetch_size=1024,
+    zone_id="UTC+8",
+    enable_redirection=True
+)
 ```
 
 * Open a session, with a parameter to specify whether to enable RPC compression
@@ -76,15 +97,15 @@ session.close()
 
 ### Data Definition Interface (DDL Interface)
 
-#### Storage Group Management
+#### Database Management
 
-* Set storage group
+* CREATE DATABASE
 
 ```python
 session.set_storage_group(group_name)
 ```
 
-* Delete one or several storage groups
+* Delete one or several databases
 
 ```python
 session.delete_storage_group(group_name)
@@ -153,6 +174,18 @@ tablet_ = Tablet(
     device_id, measurements_, data_types_, values_, timestamps_
 )
 session.insert_tablet(tablet_)
+
+values_ = [
+    [None, 10, 11, 1.1, 10011.1, "test01"],
+    [True, None, 11111, 1.25, 101.0, "test02"],
+    [False, 100, None, 188.1, 688.25, "test03"],
+    [True, 0, 0, 0, None, None],
+]
+timestamps_ = [16, 17, 18, 19]
+tablet_ = Tablet(
+    device_id, measurements_, data_types_, values_, timestamps_
+)
+session.insert_tablet(tablet_)
 ```
 * Numpy Tablet
 
@@ -165,6 +198,7 @@ With less memory footprint and time cost of serialization, the insert performanc
    (if not, the default dtypes are also ok).
 
 ```python
+import numpy as np
 data_types_ = [
     TSDataType.BOOLEAN,
     TSDataType.INT32,
@@ -183,9 +217,32 @@ np_values_ = [
 ]
 np_timestamps_ = np.array([1, 2, 3, 4], TSDataType.INT64.np_dtype())
 np_tablet_ = NumpyTablet(
-  "root.sg_test_01.d_02", measurements_, data_types_, np_values_, np_timestamps_
+  device_id, measurements_, data_types_, np_values_, np_timestamps_
 )
 session.insert_tablet(np_tablet_)
+
+# insert one numpy tablet with None into the database.
+np_values_ = [
+    np.array([False, True, False, True], TSDataType.BOOLEAN.np_dtype()),
+    np.array([10, 100, 100, 0], TSDataType.INT32.np_dtype()),
+    np.array([11, 11111, 1, 0], TSDataType.INT64.np_dtype()),
+    np.array([1.1, 1.25, 188.1, 0], TSDataType.FLOAT.np_dtype()),
+    np.array([10011.1, 101.0, 688.25, 6.25], TSDataType.DOUBLE.np_dtype()),
+    np.array(["test01", "test02", "test03", "test04"], TSDataType.TEXT.np_dtype()),
+]
+np_timestamps_ = np.array([98, 99, 100, 101], TSDataType.INT64.np_dtype())
+np_bitmaps_ = []
+for i in range(len(measurements_)):
+    np_bitmaps_.append(BitMap(len(np_timestamps_)))
+np_bitmaps_[0].mark(0)
+np_bitmaps_[1].mark(1)
+np_bitmaps_[2].mark(2)
+np_bitmaps_[4].mark(3)
+np_bitmaps_[5].mark(3)
+np_tablet_with_none = NumpyTablet(
+    device_id, measurements_, data_types_, np_values_, np_timestamps_, np_bitmaps_
+)
+session.insert_tablet(np_tablet_with_none)
 ```
 
 * Insert multiple Tablets
@@ -261,22 +318,19 @@ session.execute_statement(sql)
 #### Create Schema Template
 The step for creating a metadata template is as follows
 1. Create the template class
-2. Adding child Node，InternalNode and MeasurementNode can be chose
+2. Adding MeasurementNode
 3. Execute create schema template function
 
 ```python
 template = Template(name=template_name, share_time=True)
 
-i_node_gps = InternalNode(name="GPS", share_time=False)
-i_node_v = InternalNode(name="vehicle", share_time=True)
 m_node_x = MeasurementNode("x", TSDataType.FLOAT, TSEncoding.RLE, Compressor.SNAPPY)
+m_node_y = MeasurementNode("y", TSDataType.FLOAT, TSEncoding.RLE, Compressor.SNAPPY)
+m_node_z = MeasurementNode("z", TSDataType.FLOAT, TSEncoding.RLE, Compressor.SNAPPY)
 
-i_node_gps.add_child(m_node_x)
-i_node_v.add_child(m_node_x)
-
-template.add_template(i_node_gps)
-template.add_template(i_node_v)
 template.add_template(m_node_x)
+template.add_template(m_node_y)
+template.add_template(m_node_z)
 
 session.create_schema_template(template)
 ```
@@ -457,7 +511,7 @@ Converting the data model of IoTDB into the data model of SQLAlchemy.
 
 The metadata in the IoTDB are：
 
-1. Storage Group
+1. Database
 2. Path
 3. Entity
 4. Measurement
@@ -470,14 +524,14 @@ The metadata in the SQLAlchemy are：
 The mapping relationship between them is：
 
 | The metadata in the SQLAlchemy | The metadata in the IoTDB                            |
-| -------------------- | ---------------------------------------------- |
-| Schema               | Storage Group                                  |
-| Table                | Path ( from storage group to entity ) + Entity |
-| Column               | Measurement                                    |
+| -------------------- | -------------------------------------------- |
+| Schema               | Database                                     |
+| Table                | Path ( from database to entity ) + Entity    |
+| Column               | Measurement                                  |
 
 The following figure shows the relationship between the two more intuitively:
 
-![sqlalchemy-to-iotdb](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/API/IoTDB-SQLAlchemy/sqlalchemy-to-iotdb.png?raw=true)
+![sqlalchemy-to-iotdb](https://alioss.timecho.com/docs/img/UserGuide/API/IoTDB-SQLAlchemy/sqlalchemy-to-iotdb.png?raw=true)
 
 #### Data type mapping
 | data type in IoTDB | data type in SQLAlchemy |

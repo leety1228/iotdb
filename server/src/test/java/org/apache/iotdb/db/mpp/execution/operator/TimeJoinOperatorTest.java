@@ -21,21 +21,24 @@ package org.apache.iotdb.db.mpp.execution.operator;
 import org.apache.iotdb.commons.concurrent.IoTDBThreadPoolFactory;
 import org.apache.iotdb.commons.exception.IllegalPathException;
 import org.apache.iotdb.commons.exception.MetadataException;
+import org.apache.iotdb.commons.path.MeasurementPath;
 import org.apache.iotdb.db.engine.querycontext.QueryDataSource;
 import org.apache.iotdb.db.engine.storagegroup.TsFileResource;
-import org.apache.iotdb.db.metadata.path.MeasurementPath;
 import org.apache.iotdb.db.mpp.common.FragmentInstanceId;
 import org.apache.iotdb.db.mpp.common.PlanFragmentId;
 import org.apache.iotdb.db.mpp.common.QueryId;
+import org.apache.iotdb.db.mpp.execution.driver.DriverContext;
 import org.apache.iotdb.db.mpp.execution.fragment.FragmentInstanceContext;
 import org.apache.iotdb.db.mpp.execution.fragment.FragmentInstanceStateMachine;
-import org.apache.iotdb.db.mpp.execution.operator.process.TimeJoinOperator;
-import org.apache.iotdb.db.mpp.execution.operator.process.merge.AscTimeComparator;
-import org.apache.iotdb.db.mpp.execution.operator.process.merge.DescTimeComparator;
-import org.apache.iotdb.db.mpp.execution.operator.process.merge.SingleColumnMerger;
+import org.apache.iotdb.db.mpp.execution.operator.process.join.RowBasedTimeJoinOperator;
+import org.apache.iotdb.db.mpp.execution.operator.process.join.TimeJoinOperator;
+import org.apache.iotdb.db.mpp.execution.operator.process.join.merge.AscTimeComparator;
+import org.apache.iotdb.db.mpp.execution.operator.process.join.merge.DescTimeComparator;
+import org.apache.iotdb.db.mpp.execution.operator.process.join.merge.SingleColumnMerger;
 import org.apache.iotdb.db.mpp.execution.operator.source.SeriesScanOperator;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeId;
 import org.apache.iotdb.db.mpp.plan.planner.plan.parameter.InputLocation;
+import org.apache.iotdb.db.mpp.plan.planner.plan.parameter.SeriesScanOptions;
 import org.apache.iotdb.db.mpp.plan.statement.component.Ordering;
 import org.apache.iotdb.db.query.reader.series.SeriesReaderTestUtil;
 import org.apache.iotdb.tsfile.exception.write.WriteProcessException;
@@ -45,6 +48,7 @@ import org.apache.iotdb.tsfile.read.common.block.column.IntColumn;
 import org.apache.iotdb.tsfile.read.common.block.column.RunLengthEncodedColumn;
 import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
 
+import io.airlift.units.Duration;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -56,6 +60,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.iotdb.db.mpp.execution.fragment.FragmentInstanceContext.createFragmentInstanceContext;
 import static org.junit.Assert.assertEquals;
@@ -82,7 +87,7 @@ public class TimeJoinOperatorTest {
   }
 
   @Test
-  public void batchTest1() {
+  public void batchTest1() throws Exception {
     ExecutorService instanceNotificationExecutor =
         IoTDBThreadPoolFactory.newFixedThreadPool(1, "test-instance-notification");
     try {
@@ -98,43 +103,45 @@ public class TimeJoinOperatorTest {
           new FragmentInstanceStateMachine(instanceId, instanceNotificationExecutor);
       FragmentInstanceContext fragmentInstanceContext =
           createFragmentInstanceContext(instanceId, stateMachine);
+      DriverContext driverContext = new DriverContext(fragmentInstanceContext, 0);
       PlanNodeId planNodeId1 = new PlanNodeId("1");
-      fragmentInstanceContext.addOperatorContext(
-          1, planNodeId1, SeriesScanOperator.class.getSimpleName());
+      driverContext.addOperatorContext(1, planNodeId1, SeriesScanOperator.class.getSimpleName());
       PlanNodeId planNodeId2 = new PlanNodeId("2");
-      fragmentInstanceContext.addOperatorContext(
-          2, planNodeId2, SeriesScanOperator.class.getSimpleName());
-      fragmentInstanceContext.addOperatorContext(
-          3, new PlanNodeId("3"), TimeJoinOperator.class.getSimpleName());
+      driverContext.addOperatorContext(2, planNodeId2, SeriesScanOperator.class.getSimpleName());
+      driverContext.addOperatorContext(
+          3, new PlanNodeId("3"), RowBasedTimeJoinOperator.class.getSimpleName());
+
+      SeriesScanOptions.Builder scanOptionsBuilder = new SeriesScanOptions.Builder();
+      scanOptionsBuilder.withAllSensors(allSensors);
       SeriesScanOperator seriesScanOperator1 =
           new SeriesScanOperator(
+              driverContext.getOperatorContexts().get(0),
               planNodeId1,
               measurementPath1,
-              allSensors,
-              TSDataType.INT32,
-              fragmentInstanceContext.getOperatorContexts().get(0),
-              null,
-              null,
-              true);
+              Ordering.ASC,
+              scanOptionsBuilder.build());
       seriesScanOperator1.initQueryDataSource(new QueryDataSource(seqResources, unSeqResources));
+      seriesScanOperator1
+          .getOperatorContext()
+          .setMaxRunTime(new Duration(500, TimeUnit.MILLISECONDS));
 
       MeasurementPath measurementPath2 =
           new MeasurementPath(TIME_JOIN_OPERATOR_TEST_SG + ".device0.sensor1", TSDataType.INT32);
       SeriesScanOperator seriesScanOperator2 =
           new SeriesScanOperator(
+              driverContext.getOperatorContexts().get(1),
               planNodeId2,
               measurementPath2,
-              allSensors,
-              TSDataType.INT32,
-              fragmentInstanceContext.getOperatorContexts().get(1),
-              null,
-              null,
-              true);
+              Ordering.ASC,
+              scanOptionsBuilder.build());
       seriesScanOperator2.initQueryDataSource(new QueryDataSource(seqResources, unSeqResources));
+      seriesScanOperator2
+          .getOperatorContext()
+          .setMaxRunTime(new Duration(500, TimeUnit.MILLISECONDS));
 
       TimeJoinOperator timeJoinOperator =
           new TimeJoinOperator(
-              fragmentInstanceContext.getOperatorContexts().get(2),
+              driverContext.getOperatorContexts().get(2),
               Arrays.asList(seriesScanOperator1, seriesScanOperator2),
               Ordering.ASC,
               Arrays.asList(TSDataType.INT32, TSDataType.INT32),
@@ -148,26 +155,23 @@ public class TimeJoinOperatorTest {
         assertEquals(2, tsBlock.getValueColumnCount());
         assertTrue(tsBlock.getColumn(0) instanceof IntColumn);
         assertTrue(tsBlock.getColumn(1) instanceof IntColumn);
-        assertEquals(20, tsBlock.getPositionCount());
-        for (int i = 0; i < tsBlock.getPositionCount(); i++) {
-          long expectedTime = i + 20L * count;
-          assertEquals(expectedTime, tsBlock.getTimeByIndex(i));
-          if (expectedTime < 200) {
-            assertEquals(20000 + expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(20000 + expectedTime, tsBlock.getColumn(1).getInt(i));
-          } else if (expectedTime < 260
-              || (expectedTime >= 300 && expectedTime < 380)
-              || expectedTime >= 400) {
-            assertEquals(10000 + expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(10000 + expectedTime, tsBlock.getColumn(1).getInt(i));
+        for (int i = 0; i < tsBlock.getPositionCount(); i++, count++) {
+          assertEquals(count, tsBlock.getTimeByIndex(i));
+          if ((long) count < 200) {
+            assertEquals(20000 + (long) count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(20000 + (long) count, tsBlock.getColumn(1).getInt(i));
+          } else if ((long) count < 260
+              || ((long) count >= 300 && (long) count < 380)
+              || (long) count >= 400) {
+            assertEquals(10000 + (long) count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(10000 + (long) count, tsBlock.getColumn(1).getInt(i));
           } else {
-            assertEquals(expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(expectedTime, tsBlock.getColumn(1).getInt(i));
+            assertEquals(count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(count, tsBlock.getColumn(1).getInt(i));
           }
         }
-        count++;
       }
-      assertEquals(25, count);
+      assertEquals(500, count);
     } catch (IllegalPathException e) {
       e.printStackTrace();
       fail();
@@ -178,7 +182,7 @@ public class TimeJoinOperatorTest {
 
   /** test time join with non-exist sensor */
   @Test
-  public void batchTest2() {
+  public void batchTest2() throws Exception {
     ExecutorService instanceNotificationExecutor =
         IoTDBThreadPoolFactory.newFixedThreadPool(1, "test-instance-notification");
     try {
@@ -195,61 +199,62 @@ public class TimeJoinOperatorTest {
           new FragmentInstanceStateMachine(instanceId, instanceNotificationExecutor);
       FragmentInstanceContext fragmentInstanceContext =
           createFragmentInstanceContext(instanceId, stateMachine);
+      DriverContext driverContext = new DriverContext(fragmentInstanceContext, 0);
       PlanNodeId planNodeId1 = new PlanNodeId("1");
-      fragmentInstanceContext.addOperatorContext(
-          1, planNodeId1, SeriesScanOperator.class.getSimpleName());
+      driverContext.addOperatorContext(1, planNodeId1, SeriesScanOperator.class.getSimpleName());
       PlanNodeId planNodeId2 = new PlanNodeId("2");
-      fragmentInstanceContext.addOperatorContext(
-          2, planNodeId2, SeriesScanOperator.class.getSimpleName());
+      driverContext.addOperatorContext(2, planNodeId2, SeriesScanOperator.class.getSimpleName());
       PlanNodeId planNodeId3 = new PlanNodeId("3");
-      fragmentInstanceContext.addOperatorContext(
-          3, planNodeId3, SeriesScanOperator.class.getSimpleName());
-      fragmentInstanceContext.addOperatorContext(
+      driverContext.addOperatorContext(3, planNodeId3, SeriesScanOperator.class.getSimpleName());
+      driverContext.addOperatorContext(
           4, new PlanNodeId("4"), TimeJoinOperator.class.getSimpleName());
+
+      SeriesScanOptions.Builder scanOptionsBuilder = new SeriesScanOptions.Builder();
+      scanOptionsBuilder.withAllSensors(allSensors);
       SeriesScanOperator seriesScanOperator1 =
           new SeriesScanOperator(
+              driverContext.getOperatorContexts().get(0),
               planNodeId1,
               measurementPath1,
-              allSensors,
-              TSDataType.INT32,
-              fragmentInstanceContext.getOperatorContexts().get(0),
-              null,
-              null,
-              true);
+              Ordering.ASC,
+              scanOptionsBuilder.build());
       seriesScanOperator1.initQueryDataSource(new QueryDataSource(seqResources, unSeqResources));
+      seriesScanOperator1
+          .getOperatorContext()
+          .setMaxRunTime(new Duration(500, TimeUnit.MILLISECONDS));
 
       MeasurementPath measurementPath2 =
           new MeasurementPath(TIME_JOIN_OPERATOR_TEST_SG + ".device0.sensor1", TSDataType.INT32);
       SeriesScanOperator seriesScanOperator2 =
           new SeriesScanOperator(
+              driverContext.getOperatorContexts().get(1),
               planNodeId2,
               measurementPath2,
-              allSensors,
-              TSDataType.INT32,
-              fragmentInstanceContext.getOperatorContexts().get(1),
-              null,
-              null,
-              true);
+              Ordering.ASC,
+              scanOptionsBuilder.build());
       seriesScanOperator2.initQueryDataSource(new QueryDataSource(seqResources, unSeqResources));
+      seriesScanOperator2
+          .getOperatorContext()
+          .setMaxRunTime(new Duration(500, TimeUnit.MILLISECONDS));
 
       MeasurementPath measurementPath3 =
           new MeasurementPath(
               TIME_JOIN_OPERATOR_TEST_SG + ".device0.error_sensor", TSDataType.INT32);
       SeriesScanOperator seriesScanOperator3 =
           new SeriesScanOperator(
+              driverContext.getOperatorContexts().get(2),
               planNodeId3,
               measurementPath3,
-              allSensors,
-              TSDataType.INT32,
-              fragmentInstanceContext.getOperatorContexts().get(2),
-              null,
-              null,
-              true);
+              Ordering.ASC,
+              scanOptionsBuilder.build());
       seriesScanOperator3.initQueryDataSource(new QueryDataSource(seqResources, unSeqResources));
+      seriesScanOperator3
+          .getOperatorContext()
+          .setMaxRunTime(new Duration(500, TimeUnit.MILLISECONDS));
 
       TimeJoinOperator timeJoinOperator =
           new TimeJoinOperator(
-              fragmentInstanceContext.getOperatorContexts().get(3),
+              driverContext.getOperatorContexts().get(3),
               Arrays.asList(seriesScanOperator1, seriesScanOperator2, seriesScanOperator3),
               Ordering.ASC,
               Arrays.asList(TSDataType.INT32, TSDataType.INT32, TSDataType.INT32),
@@ -265,27 +270,24 @@ public class TimeJoinOperatorTest {
         assertTrue(tsBlock.getColumn(0) instanceof IntColumn);
         assertTrue(tsBlock.getColumn(1) instanceof IntColumn);
         assertTrue(tsBlock.getColumn(2) instanceof RunLengthEncodedColumn);
-        assertEquals(20, tsBlock.getPositionCount());
-        for (int i = 0; i < tsBlock.getPositionCount(); i++) {
-          long expectedTime = i + 20L * count;
-          assertEquals(expectedTime, tsBlock.getTimeByIndex(i));
+        for (int i = 0; i < tsBlock.getPositionCount(); i++, count++) {
+          assertEquals(count, tsBlock.getTimeByIndex(i));
           assertTrue(tsBlock.getColumn(2).isNull(i));
-          if (expectedTime < 200) {
-            assertEquals(20000 + expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(20000 + expectedTime, tsBlock.getColumn(1).getInt(i));
-          } else if (expectedTime < 260
-              || (expectedTime >= 300 && expectedTime < 380)
-              || expectedTime >= 400) {
-            assertEquals(10000 + expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(10000 + expectedTime, tsBlock.getColumn(1).getInt(i));
+          if ((long) count < 200) {
+            assertEquals(20000 + (long) count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(20000 + (long) count, tsBlock.getColumn(1).getInt(i));
+          } else if ((long) count < 260
+              || ((long) count >= 300 && (long) count < 380)
+              || (long) count >= 400) {
+            assertEquals(10000 + (long) count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(10000 + (long) count, tsBlock.getColumn(1).getInt(i));
           } else {
-            assertEquals(expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(expectedTime, tsBlock.getColumn(1).getInt(i));
+            assertEquals(count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(count, tsBlock.getColumn(1).getInt(i));
           }
         }
-        count++;
       }
-      assertEquals(25, count);
+      assertEquals(500, count);
     } catch (IllegalPathException e) {
       e.printStackTrace();
       fail();
@@ -296,7 +298,7 @@ public class TimeJoinOperatorTest {
 
   /** test time join with non-exist sensor and order by time desc */
   @Test
-  public void batchTest3() {
+  public void batchTest3() throws Exception {
     ExecutorService instanceNotificationExecutor =
         IoTDBThreadPoolFactory.newFixedThreadPool(1, "test-instance-notification");
     try {
@@ -313,61 +315,62 @@ public class TimeJoinOperatorTest {
           new FragmentInstanceStateMachine(instanceId, instanceNotificationExecutor);
       FragmentInstanceContext fragmentInstanceContext =
           createFragmentInstanceContext(instanceId, stateMachine);
+      DriverContext driverContext = new DriverContext(fragmentInstanceContext, 0);
       PlanNodeId planNodeId1 = new PlanNodeId("1");
-      fragmentInstanceContext.addOperatorContext(
-          1, planNodeId1, SeriesScanOperator.class.getSimpleName());
+      driverContext.addOperatorContext(1, planNodeId1, SeriesScanOperator.class.getSimpleName());
       PlanNodeId planNodeId2 = new PlanNodeId("2");
-      fragmentInstanceContext.addOperatorContext(
-          2, planNodeId2, SeriesScanOperator.class.getSimpleName());
+      driverContext.addOperatorContext(2, planNodeId2, SeriesScanOperator.class.getSimpleName());
       PlanNodeId planNodeId3 = new PlanNodeId("3");
-      fragmentInstanceContext.addOperatorContext(
-          3, planNodeId3, SeriesScanOperator.class.getSimpleName());
-      fragmentInstanceContext.addOperatorContext(
+      driverContext.addOperatorContext(3, planNodeId3, SeriesScanOperator.class.getSimpleName());
+      driverContext.addOperatorContext(
           4, new PlanNodeId("4"), TimeJoinOperator.class.getSimpleName());
+
+      SeriesScanOptions.Builder scanOptionsBuilder = new SeriesScanOptions.Builder();
+      scanOptionsBuilder.withAllSensors(allSensors);
       SeriesScanOperator seriesScanOperator1 =
           new SeriesScanOperator(
+              driverContext.getOperatorContexts().get(0),
               planNodeId1,
               measurementPath1,
-              allSensors,
-              TSDataType.INT32,
-              fragmentInstanceContext.getOperatorContexts().get(0),
-              null,
-              null,
-              false);
+              Ordering.DESC,
+              scanOptionsBuilder.build());
       seriesScanOperator1.initQueryDataSource(new QueryDataSource(seqResources, unSeqResources));
+      seriesScanOperator1
+          .getOperatorContext()
+          .setMaxRunTime(new Duration(500, TimeUnit.MILLISECONDS));
 
       MeasurementPath measurementPath2 =
           new MeasurementPath(TIME_JOIN_OPERATOR_TEST_SG + ".device0.sensor1", TSDataType.INT32);
       SeriesScanOperator seriesScanOperator2 =
           new SeriesScanOperator(
+              driverContext.getOperatorContexts().get(1),
               planNodeId2,
               measurementPath2,
-              allSensors,
-              TSDataType.INT32,
-              fragmentInstanceContext.getOperatorContexts().get(1),
-              null,
-              null,
-              false);
+              Ordering.DESC,
+              scanOptionsBuilder.build());
       seriesScanOperator2.initQueryDataSource(new QueryDataSource(seqResources, unSeqResources));
+      seriesScanOperator2
+          .getOperatorContext()
+          .setMaxRunTime(new Duration(500, TimeUnit.MILLISECONDS));
 
       MeasurementPath measurementPath3 =
           new MeasurementPath(
               TIME_JOIN_OPERATOR_TEST_SG + ".device0.error_sensor", TSDataType.INT32);
       SeriesScanOperator seriesScanOperator3 =
           new SeriesScanOperator(
+              driverContext.getOperatorContexts().get(2),
               planNodeId3,
               measurementPath3,
-              allSensors,
-              TSDataType.INT32,
-              fragmentInstanceContext.getOperatorContexts().get(2),
-              null,
-              null,
-              true);
+              Ordering.ASC,
+              scanOptionsBuilder.build());
       seriesScanOperator3.initQueryDataSource(new QueryDataSource(seqResources, unSeqResources));
+      seriesScanOperator3
+          .getOperatorContext()
+          .setMaxRunTime(new Duration(500, TimeUnit.MILLISECONDS));
 
       TimeJoinOperator timeJoinOperator =
           new TimeJoinOperator(
-              fragmentInstanceContext.getOperatorContexts().get(3),
+              driverContext.getOperatorContexts().get(3),
               Arrays.asList(seriesScanOperator1, seriesScanOperator2, seriesScanOperator3),
               Ordering.DESC,
               Arrays.asList(TSDataType.INT32, TSDataType.INT32, TSDataType.INT32),
@@ -376,34 +379,31 @@ public class TimeJoinOperatorTest {
                   new SingleColumnMerger(new InputLocation(1, 0), new DescTimeComparator()),
                   new SingleColumnMerger(new InputLocation(2, 0), new DescTimeComparator())),
               new DescTimeComparator());
-      int count = 25;
+      int count = 499;
       while (timeJoinOperator.hasNext()) {
         TsBlock tsBlock = timeJoinOperator.next();
         assertEquals(3, tsBlock.getValueColumnCount());
         assertTrue(tsBlock.getColumn(0) instanceof IntColumn);
         assertTrue(tsBlock.getColumn(1) instanceof IntColumn);
         assertTrue(tsBlock.getColumn(2) instanceof RunLengthEncodedColumn);
-        assertEquals(20, tsBlock.getPositionCount());
-        for (int i = 0; i < tsBlock.getPositionCount(); i++) {
-          long expectedTime = tsBlock.getPositionCount() - i - 1 + 20L * (count - 1);
-          assertEquals(expectedTime, tsBlock.getTimeByIndex(i));
+        for (int i = 0; i < tsBlock.getPositionCount(); i++, count--) {
+          assertEquals(count, tsBlock.getTimeByIndex(i));
           assertTrue(tsBlock.getColumn(2).isNull(i));
-          if (expectedTime < 200) {
-            assertEquals(20000 + expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(20000 + expectedTime, tsBlock.getColumn(1).getInt(i));
-          } else if (expectedTime < 260
-              || (expectedTime >= 300 && expectedTime < 380)
-              || expectedTime >= 400) {
-            assertEquals(10000 + expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(10000 + expectedTime, tsBlock.getColumn(1).getInt(i));
+          if ((long) count < 200) {
+            assertEquals(20000 + (long) count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(20000 + (long) count, tsBlock.getColumn(1).getInt(i));
+          } else if ((long) count < 260
+              || ((long) count >= 300 && (long) count < 380)
+              || (long) count >= 400) {
+            assertEquals(10000 + (long) count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(10000 + (long) count, tsBlock.getColumn(1).getInt(i));
           } else {
-            assertEquals(expectedTime, tsBlock.getColumn(0).getInt(i));
-            assertEquals(expectedTime, tsBlock.getColumn(1).getInt(i));
+            assertEquals(count, tsBlock.getColumn(0).getInt(i));
+            assertEquals(count, tsBlock.getColumn(1).getInt(i));
           }
         }
-        count--;
       }
-      assertEquals(0, count);
+      assertEquals(-1, count);
     } catch (IllegalPathException e) {
       e.printStackTrace();
       fail();

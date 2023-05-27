@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static com.google.common.util.concurrent.Futures.successfulAsList;
+import static org.apache.iotdb.tsfile.read.common.block.TsBlockBuilderStatus.DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES;
 
 // collect all last query result in the same data region and there is no order guarantee
 public class LastQueryOperator implements ProcessOperator {
@@ -42,7 +43,7 @@ public class LastQueryOperator implements ProcessOperator {
 
   private final OperatorContext operatorContext;
 
-  private final List<UpdateLastCacheOperator> children;
+  private final List<AbstractUpdateLastCacheOperator> children;
 
   private final int inputOperatorsCount;
 
@@ -52,7 +53,7 @@ public class LastQueryOperator implements ProcessOperator {
 
   public LastQueryOperator(
       OperatorContext operatorContext,
-      List<UpdateLastCacheOperator> children,
+      List<AbstractUpdateLastCacheOperator> children,
       TsBlockBuilder builder) {
     this.operatorContext = operatorContext;
     this.children = children;
@@ -84,7 +85,7 @@ public class LastQueryOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
+  public TsBlock next() throws Exception {
 
     // we have consumed up data from children Operator, just return all remaining cached data in
     // tsBlockBuilder
@@ -103,14 +104,18 @@ public class LastQueryOperator implements ProcessOperator {
     while ((System.nanoTime() - start < maxRuntime)
         && (currentIndex < endIndex)
         && !tsBlockBuilder.isFull()) {
-      if (children.get(currentIndex).hasNext()) {
-        TsBlock tsBlock = children.get(currentIndex).next();
+      if (children.get(currentIndex).hasNextWithTimer()) {
+        TsBlock tsBlock = children.get(currentIndex).nextWithTimer();
         if (tsBlock == null) {
           return null;
         } else if (!tsBlock.isEmpty()) {
-          LastQueryUtil.appendLastValue(tsBlockBuilder, tsBlock, 0);
+          LastQueryUtil.appendLastValue(tsBlockBuilder, tsBlock);
         }
+      } else {
+        children.get(currentIndex).close();
+        children.set(currentIndex, null);
       }
+
       currentIndex++;
     }
 
@@ -120,24 +125,51 @@ public class LastQueryOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean hasNext() {
+  public boolean hasNext() throws Exception {
     return currentIndex < inputOperatorsCount || !tsBlockBuilder.isEmpty();
   }
 
   @Override
-  public boolean isFinished() {
-    return !hasNext();
+  public boolean isFinished() throws Exception {
+    return !hasNextWithTimer();
   }
 
   @Override
   public void close() throws Exception {
     for (Operator child : children) {
-      child.close();
+      if (child != null) {
+        child.close();
+      }
     }
     tsBlockBuilder = null;
   }
 
   private int getEndIndex() {
     return currentIndex + Math.min(MAX_DETECT_COUNT, inputOperatorsCount - currentIndex);
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    long maxPeekMemory =
+        Math.max(DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES, tsBlockBuilder.getRetainedSizeInBytes());
+    long res = 0;
+    for (Operator child : children) {
+      res = Math.max(res, maxPeekMemory + child.calculateMaxPeekMemory());
+    }
+    return res;
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    return Math.max(DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES, tsBlockBuilder.getRetainedSizeInBytes());
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    long max = 0;
+    for (Operator operator : children) {
+      max = Math.max(max, operator.calculateRetainedSizeAfterCallingNext());
+    }
+    return max;
   }
 }

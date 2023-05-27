@@ -21,8 +21,15 @@ package org.apache.iotdb.db.mpp.execution.operator.process;
 
 import org.apache.iotdb.db.mpp.execution.operator.Operator;
 import org.apache.iotdb.db.mpp.execution.operator.OperatorContext;
+import org.apache.iotdb.db.mpp.transformation.dag.column.CaseWhenThenColumnTransformer;
 import org.apache.iotdb.db.mpp.transformation.dag.column.ColumnTransformer;
+import org.apache.iotdb.db.mpp.transformation.dag.column.binary.BinaryColumnTransformer;
+import org.apache.iotdb.db.mpp.transformation.dag.column.leaf.IdentityColumnTransformer;
 import org.apache.iotdb.db.mpp.transformation.dag.column.leaf.LeafColumnTransformer;
+import org.apache.iotdb.db.mpp.transformation.dag.column.multi.MappableUDFColumnTransformer;
+import org.apache.iotdb.db.mpp.transformation.dag.column.ternary.TernaryColumnTransformer;
+import org.apache.iotdb.db.mpp.transformation.dag.column.unary.UnaryColumnTransformer;
+import org.apache.iotdb.tsfile.common.conf.TSFileDescriptor;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.read.common.block.TsBlock;
 import org.apache.iotdb.tsfile.read.common.block.TsBlockBuilder;
@@ -30,6 +37,7 @@ import org.apache.iotdb.tsfile.read.common.block.column.Column;
 import org.apache.iotdb.tsfile.read.common.block.column.ColumnBuilder;
 import org.apache.iotdb.tsfile.read.common.block.column.TimeColumn;
 import org.apache.iotdb.tsfile.read.common.block.column.TimeColumnBuilder;
+import org.apache.iotdb.tsfile.utils.Pair;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
@@ -56,6 +64,9 @@ public class FilterAndProjectOperator implements ProcessOperator {
 
   private final OperatorContext operatorContext;
 
+  // false when we only need to do projection
+  private final boolean hasFilter;
+
   public FilterAndProjectOperator(
       OperatorContext operatorContext,
       Operator inputOperator,
@@ -65,7 +76,8 @@ public class FilterAndProjectOperator implements ProcessOperator {
       List<ColumnTransformer> commonTransformerList,
       List<LeafColumnTransformer> projectLeafColumnTransformerList,
       List<ColumnTransformer> projectOutputTransformerList,
-      boolean hasNonMappableUDF) {
+      boolean hasNonMappableUDF,
+      boolean hasFilter) {
     this.operatorContext = operatorContext;
     this.inputOperator = inputOperator;
     this.filterLeafColumnTransformerList = filterLeafColumnTransformerList;
@@ -75,6 +87,7 @@ public class FilterAndProjectOperator implements ProcessOperator {
     this.projectOutputTransformerList = projectOutputTransformerList;
     this.hasNonMappableUDF = hasNonMappableUDF;
     this.filterTsBlockBuilder = new TsBlockBuilder(8, filterOutputDataTypes);
+    this.hasFilter = hasFilter;
   }
 
   @Override
@@ -83,10 +96,14 @@ public class FilterAndProjectOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
-    TsBlock input = inputOperator.next();
+  public TsBlock next() throws Exception {
+    TsBlock input = inputOperator.nextWithTimer();
     if (input == null) {
       return null;
+    }
+
+    if (!hasFilter) {
+      return getTransformedTsBlock(input);
     }
 
     TsBlock filterResult = getFilterTsBlock(input);
@@ -177,17 +194,148 @@ public class FilterAndProjectOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean hasNext() {
-    return inputOperator.hasNext();
+  public boolean hasNext() throws Exception {
+    return inputOperator.hasNextWithTimer();
   }
 
   @Override
-  public boolean isFinished() {
+  public boolean isFinished() throws Exception {
     return inputOperator.isFinished();
   }
 
   @Override
   public ListenableFuture<?> isBlocked() {
     return inputOperator.isBlocked();
+  }
+
+  @Override
+  public void close() throws Exception {
+    for (ColumnTransformer columnTransformer : projectOutputTransformerList) {
+      columnTransformer.close();
+    }
+    if (filterOutputTransformer != null) {
+      filterOutputTransformer.close();
+    }
+    inputOperator.close();
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    long maxPeekMemory = inputOperator.calculateMaxReturnSize();
+    int maxCachedColumn = 0;
+    // Only do projection, calculate max cached column size of calc tree
+    if (!hasFilter) {
+      for (int i = 0; i < projectOutputTransformerList.size(); i++) {
+        ColumnTransformer c = projectOutputTransformerList.get(i);
+        maxCachedColumn = Math.max(maxCachedColumn, 1 + i + getMaxLevelOfColumnTransformerTree(c));
+      }
+      return Math.max(
+              maxPeekMemory,
+              (long) maxCachedColumn
+                  * TSFileDescriptor.getInstance().getConfig().getPageSizeInByte())
+          + inputOperator.calculateRetainedSizeAfterCallingNext();
+    }
+
+    // has Filter
+    maxCachedColumn =
+        Math.max(
+            1 + getMaxLevelOfColumnTransformerTree(filterOutputTransformer),
+            1 + commonTransformerList.size());
+    if (!hasNonMappableUDF) {
+      for (int i = 0; i < projectOutputTransformerList.size(); i++) {
+        ColumnTransformer c = projectOutputTransformerList.get(i);
+        maxCachedColumn = Math.max(maxCachedColumn, 1 + i + getMaxLevelOfColumnTransformerTree(c));
+      }
+    }
+    return Math.max(
+            maxPeekMemory,
+            (long) maxCachedColumn * TSFileDescriptor.getInstance().getConfig().getPageSizeInByte())
+        + inputOperator.calculateRetainedSizeAfterCallingNext();
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    // time + all value columns
+    if (!hasFilter || !hasNonMappableUDF) {
+      return (long) (1 + projectOutputTransformerList.size())
+          * TSFileDescriptor.getInstance().getConfig().getPageSizeInByte();
+    } else {
+      return (long) (1 + filterTsBlockBuilder.getValueColumnBuilders().length)
+          * TSFileDescriptor.getInstance().getConfig().getPageSizeInByte();
+    }
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    return inputOperator.calculateRetainedSizeAfterCallingNext();
+  }
+
+  private int getMaxLevelOfColumnTransformerTree(ColumnTransformer columnTransformer) {
+    if (columnTransformer instanceof LeafColumnTransformer) {
+      // Time column is always calculated, we ignore it here. Constant column is ignored.
+      if (columnTransformer instanceof IdentityColumnTransformer) {
+        return 1;
+      } else {
+        return 0;
+      }
+    } else if (columnTransformer instanceof UnaryColumnTransformer) {
+      return Math.max(
+          2,
+          getMaxLevelOfColumnTransformerTree(
+              ((UnaryColumnTransformer) columnTransformer).getChildColumnTransformer()));
+    } else if (columnTransformer instanceof BinaryColumnTransformer) {
+      int childMaxLevel =
+          Math.max(
+              getMaxLevelOfColumnTransformerTree(
+                  ((BinaryColumnTransformer) columnTransformer).getLeftTransformer()),
+              getMaxLevelOfColumnTransformerTree(
+                  ((BinaryColumnTransformer) columnTransformer).getRightTransformer()));
+      return Math.max(3, childMaxLevel);
+    } else if (columnTransformer instanceof TernaryColumnTransformer) {
+      int childMaxLevel =
+          Math.max(
+              getMaxLevelOfColumnTransformerTree(
+                  ((TernaryColumnTransformer) columnTransformer).getFirstColumnTransformer()),
+              Math.max(
+                  getMaxLevelOfColumnTransformerTree(
+                      ((TernaryColumnTransformer) columnTransformer).getSecondColumnTransformer()),
+                  getMaxLevelOfColumnTransformerTree(
+                      ((TernaryColumnTransformer) columnTransformer).getThirdColumnTransformer())));
+      return Math.max(4, childMaxLevel);
+    } else if (columnTransformer instanceof MappableUDFColumnTransformer) {
+      int childMaxLevel = 0;
+      for (ColumnTransformer c :
+          ((MappableUDFColumnTransformer) columnTransformer).getInputColumnTransformers()) {
+        childMaxLevel = Math.max(childMaxLevel, getMaxLevelOfColumnTransformerTree(c));
+      }
+      return Math.max(
+          1
+              + ((MappableUDFColumnTransformer) columnTransformer)
+                  .getInputColumnTransformers()
+                  .length,
+          childMaxLevel);
+    } else if (columnTransformer instanceof CaseWhenThenColumnTransformer) {
+      int childMaxLevel = 0;
+      int childCount = 0;
+      for (Pair<ColumnTransformer, ColumnTransformer> whenThenColumnTransformer :
+          ((CaseWhenThenColumnTransformer) columnTransformer).getWhenThenColumnTransformers()) {
+        childMaxLevel =
+            Math.max(
+                childMaxLevel, getMaxLevelOfColumnTransformerTree(whenThenColumnTransformer.left));
+        childMaxLevel =
+            Math.max(
+                childMaxLevel, getMaxLevelOfColumnTransformerTree(whenThenColumnTransformer.right));
+        childCount++;
+      }
+      childMaxLevel =
+          Math.max(
+              childMaxLevel,
+              getMaxLevelOfColumnTransformerTree(
+                  ((CaseWhenThenColumnTransformer) columnTransformer).getElseTransformer()));
+      childMaxLevel = Math.max(childMaxLevel, childCount + 2);
+      return childMaxLevel;
+    } else {
+      throw new UnsupportedOperationException("Unsupported ColumnTransformer");
+    }
   }
 }

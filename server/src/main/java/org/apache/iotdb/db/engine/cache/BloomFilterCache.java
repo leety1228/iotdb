@@ -53,7 +53,7 @@ public class BloomFilterCache {
 
   private BloomFilterCache() {
     if (CACHE_ENABLE) {
-      logger.info("BloomFilterCache size = " + MEMORY_THRESHOLD_IN_BLOOM_FILTER_CACHE);
+      logger.info("BloomFilterCache size = {}", MEMORY_THRESHOLD_IN_BLOOM_FILTER_CACHE);
     }
     lruCache =
         Caffeine.newBuilder()
@@ -99,13 +99,13 @@ public class BloomFilterCache {
     BloomFilter bloomFilter = lruCache.get(key);
 
     if (debug) {
-      DEBUG_LOGGER.info("get bloomFilter from cache where filePath is: " + key.filePath);
+      DEBUG_LOGGER.info("get bloomFilter from cache where filePath is: {}", key.filePath);
     }
 
     return bloomFilter;
   }
 
-  public double calculateChunkHitRatio() {
+  public double calculateBloomFilterHitRatio() {
     return lruCache.stats().hitRate();
   }
 

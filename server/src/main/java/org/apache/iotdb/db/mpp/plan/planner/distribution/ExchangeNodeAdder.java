@@ -21,6 +21,7 @@ package org.apache.iotdb.db.mpp.plan.planner.distribution;
 
 import org.apache.iotdb.common.rpc.thrift.TRegionReplicaSet;
 import org.apache.iotdb.commons.partition.DataPartition;
+import org.apache.iotdb.db.mpp.plan.analyze.Analysis;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanVisitor;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.WritePlanNode;
@@ -37,8 +38,13 @@ import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.DeviceViewNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.ExchangeNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.FilterNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.GroupByLevelNode;
-import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.MultiChildNode;
+import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.GroupByTagNode;
+import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.HorizontallyConcatNode;
+import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.MergeSortNode;
+import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.MultiChildProcessNode;
+import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.SingleDeviceViewNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.SlidingWindowAggregationNode;
+import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.SortNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.TimeJoinNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.TransformNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.last.LastQueryCollectNode;
@@ -61,6 +67,13 @@ import java.util.stream.Collectors;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 
 public class ExchangeNodeAdder extends PlanVisitor<PlanNode, NodeGroupContext> {
+
+  private final Analysis analysis;
+
+  public ExchangeNodeAdder(Analysis analysis) {
+    this.analysis = analysis;
+  }
+
   @Override
   public PlanNode visitPlan(PlanNode node, NodeGroupContext context) {
     // TODO: (xingtanzjr) we apply no action for IWritePlanNode currently
@@ -112,6 +125,7 @@ public class ExchangeNodeAdder extends PlanVisitor<PlanNode, NodeGroupContext> {
                     new ExchangeNode(context.queryContext.getQueryId().genPlanNodeId());
                 exchangeNode.setChild(child);
                 exchangeNode.setOutputColumnNames(child.getOutputColumnNames());
+                context.hasExchangeNode = true;
                 newNode.addChild(exchangeNode);
               } else {
                 newNode.addChild(child);
@@ -191,6 +205,16 @@ public class ExchangeNodeAdder extends PlanVisitor<PlanNode, NodeGroupContext> {
   }
 
   @Override
+  public PlanNode visitSingleDeviceView(SingleDeviceViewNode node, NodeGroupContext context) {
+    return processOneChildNode(node, context);
+  }
+
+  @Override
+  public PlanNode visitMergeSort(MergeSortNode node, NodeGroupContext context) {
+    return processMultiChildNode(node, context);
+  }
+
+  @Override
   public PlanNode visitLastQueryMerge(LastQueryMergeNode node, NodeGroupContext context) {
     return processMultiChildNode(node, context);
   }
@@ -236,8 +260,27 @@ public class ExchangeNodeAdder extends PlanVisitor<PlanNode, NodeGroupContext> {
     return processOneChildNode(node, context);
   }
 
-  private PlanNode processMultiChildNode(MultiChildNode node, NodeGroupContext context) {
-    MultiChildNode newNode = (MultiChildNode) node.clone();
+  @Override
+  public PlanNode visitGroupByTag(GroupByTagNode node, NodeGroupContext context) {
+    return processMultiChildNode(node, context);
+  }
+
+  @Override
+  public PlanNode visitHorizontallyConcat(HorizontallyConcatNode node, NodeGroupContext context) {
+    return processMultiChildNode(node, context);
+  }
+
+  @Override
+  public PlanNode visitSort(SortNode node, NodeGroupContext context) {
+    return processOneChildNode(node, context);
+  }
+
+  private PlanNode processMultiChildNode(MultiChildProcessNode node, NodeGroupContext context) {
+    if (analysis.isVirtualSource()) {
+      return processMultiChildNodeByLocation(node, context);
+    }
+
+    MultiChildProcessNode newNode = (MultiChildProcessNode) node.clone();
     List<PlanNode> visitedChildren = new ArrayList<>();
     node.getChildren()
         .forEach(
@@ -245,38 +288,77 @@ public class ExchangeNodeAdder extends PlanVisitor<PlanNode, NodeGroupContext> {
               visitedChildren.add(visit(child, context));
             });
 
-    TRegionReplicaSet dataRegion = calculateDataRegionByChildren(visitedChildren, context);
-    NodeDistributionType distributionType =
-        nodeDistributionIsSame(visitedChildren, context)
-            ? NodeDistributionType.SAME_WITH_ALL_CHILDREN
-            : NodeDistributionType.SAME_WITH_SOME_CHILD;
-    context.putNodeDistribution(
-        newNode.getPlanNodeId(), new NodeDistribution(distributionType, dataRegion));
+    TRegionReplicaSet dataRegion;
+    NodeDistributionType distributionType;
+    if (context.isAlignByDevice()) {
+      // For align by device,
+      // if dataRegions of children are the same, we set child's dataRegion to this node,
+      // else we set the selected mostlyUsedDataRegion to this node
+      boolean inSame = nodeDistributionIsSame(visitedChildren, context);
+      dataRegion =
+          inSame
+              ? context.getNodeDistribution(visitedChildren.get(0).getPlanNodeId()).region
+              : context.getMostlyUsedDataRegion();
+      context.putNodeDistribution(
+          newNode.getPlanNodeId(),
+          new NodeDistribution(
+              inSame
+                  ? NodeDistributionType.SAME_WITH_ALL_CHILDREN
+                  : NodeDistributionType.SAME_WITH_SOME_CHILD,
+              dataRegion));
+    } else {
+      // TODO For align by time, we keep old logic for now
+      dataRegion = calculateDataRegionByChildren(visitedChildren, context);
+      distributionType =
+          nodeDistributionIsSame(visitedChildren, context)
+              ? NodeDistributionType.SAME_WITH_ALL_CHILDREN
+              : NodeDistributionType.SAME_WITH_SOME_CHILD;
+      context.putNodeDistribution(
+          newNode.getPlanNodeId(), new NodeDistribution(distributionType, dataRegion));
 
-    // If the distributionType of all the children are same, no ExchangeNode need to be added.
-    if (distributionType == NodeDistributionType.SAME_WITH_ALL_CHILDREN) {
-      newNode.setChildren(visitedChildren);
-      return newNode;
+      // If the distributionType of all the children are same, no ExchangeNode need to be added.
+      if (distributionType == NodeDistributionType.SAME_WITH_ALL_CHILDREN) {
+        newNode.setChildren(visitedChildren);
+        return newNode;
+      }
     }
 
     // Otherwise, we need to add ExchangeNode for the child whose DataRegion is different from the
     // parent.
     visitedChildren.forEach(
         child -> {
-          // If the child's region is NOT_ASSIGNED, it means the child do not belong to any
-          // existing DataRegion. We make it belong to its parent and no ExchangeNode will be added.
-          if (context.getNodeDistribution(child.getPlanNodeId()).region
-                  != DataPartition.NOT_ASSIGNED
-              && !dataRegion.equals(context.getNodeDistribution(child.getPlanNodeId()).region)) {
+          if (!dataRegion.equals(context.getNodeDistribution(child.getPlanNodeId()).region)) {
+            if (child instanceof SingleDeviceViewNode) {
+              ((SingleDeviceViewNode) child).setCacheOutputColumnNames(true);
+            }
             ExchangeNode exchangeNode =
                 new ExchangeNode(context.queryContext.getQueryId().genPlanNodeId());
             exchangeNode.setChild(child);
             exchangeNode.setOutputColumnNames(child.getOutputColumnNames());
+            context.hasExchangeNode = true;
             newNode.addChild(exchangeNode);
           } else {
             newNode.addChild(child);
           }
         });
+    return newNode;
+  }
+
+  private PlanNode processMultiChildNodeByLocation(
+      MultiChildProcessNode node, NodeGroupContext context) {
+    MultiChildProcessNode newNode = (MultiChildProcessNode) node.clone();
+
+    List<PlanNode> children = node.getChildren();
+    newNode.addChild(children.get(0));
+    for (int i = 1; i < children.size(); i++) {
+      PlanNode child = children.get(i);
+      ExchangeNode exchangeNode =
+          new ExchangeNode(context.queryContext.getQueryId().genPlanNodeId());
+      exchangeNode.setChild(child);
+      exchangeNode.setOutputColumnNames(child.getOutputColumnNames());
+      context.hasExchangeNode = true;
+      newNode.addChild(exchangeNode);
+    }
     return newNode;
   }
 

@@ -82,12 +82,12 @@ public class LinearFillOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
+  public TsBlock next() throws Exception {
 
     // make sure we call child.next() at most once
     if (cachedTsBlock.isEmpty()) {
       canCallNext = false;
-      TsBlock nextTsBlock = child.next();
+      TsBlock nextTsBlock = child.nextWithTimer();
       // child operator's calculation is not finished, so we just return null
       if (nextTsBlock == null || nextTsBlock.isEmpty()) {
         return nextTsBlock;
@@ -142,9 +142,9 @@ public class LinearFillOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean hasNext() {
+  public boolean hasNext() throws Exception {
     // if child.hasNext() return false, it means that there is no more tsBlocks
-    noMoreTsBlock = !child.hasNext();
+    noMoreTsBlock = !child.hasNextWithTimer();
     // if there is more tsBlock, we can call child.next() once
     canCallNext = !noMoreTsBlock;
     return !cachedTsBlock.isEmpty() || !noMoreTsBlock;
@@ -156,8 +156,28 @@ public class LinearFillOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean isFinished() {
+  public boolean isFinished() throws Exception {
     return cachedTsBlock.isEmpty() && child.isFinished();
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    // while doing linear fill, we may need to copy the corresponding column if there exists null
+    // values, and we may also need to cache next TsBlock to get next not null value
+    // so the max peek memory may be triple or more, here we just use 3 as the estimated factor
+    // because in most cases, we will get next not null value in next TsBlock
+    return 3 * child.calculateMaxPeekMemory() + child.calculateRetainedSizeAfterCallingNext();
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    return child.calculateMaxReturnSize();
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    // we can safely ignore two lines cached in LinearFill
+    return child.calculateRetainedSizeAfterCallingNext();
   }
 
   /**
@@ -188,11 +208,11 @@ public class LinearFillOperator implements ProcessOperator {
   /**
    * @return true if we succeed to get next TsBlock and add it into cachedTsBlock, otherwise false
    */
-  private boolean tryToGetNextTsBlock() {
+  private boolean tryToGetNextTsBlock() throws Exception {
     if (canCallNext) { // if we can call child.next(), we call that and cache it in
       // cachedTsBlock
       canCallNext = false;
-      TsBlock nextTsBlock = child.next();
+      TsBlock nextTsBlock = child.nextWithTimer();
       // child operator's calculation is not finished, so we just return null
       if (nextTsBlock == null || nextTsBlock.isEmpty()) {
         return false;

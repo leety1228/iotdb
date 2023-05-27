@@ -19,18 +19,17 @@
 package org.apache.iotdb.db.wal.node;
 
 import org.apache.iotdb.db.engine.memtable.IMemTable;
+import org.apache.iotdb.db.mpp.plan.planner.plan.node.write.DeleteDataNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.write.InsertRowNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.write.InsertTabletNode;
-import org.apache.iotdb.db.qp.physical.crud.DeletePlan;
-import org.apache.iotdb.db.qp.physical.crud.InsertRowPlan;
-import org.apache.iotdb.db.qp.physical.crud.InsertTabletPlan;
 import org.apache.iotdb.db.wal.exception.WALException;
 import org.apache.iotdb.db.wal.utils.listener.WALFlushListener;
 
 /** This class provides fake wal node when wal is disabled or exception happens. */
 public class WALFakeNode implements IWALNode {
   private final WALFlushListener.Status status;
-  private final Exception cause;
+  private final WALFlushListener successListener;
+  private final WALFlushListener failListener;
 
   private WALFakeNode(WALFlushListener.Status status) {
     this(status, null);
@@ -38,22 +37,14 @@ public class WALFakeNode implements IWALNode {
 
   public WALFakeNode(WALFlushListener.Status status, Exception cause) {
     this.status = status;
-    this.cause = cause;
-  }
-
-  @Override
-  public WALFlushListener log(long memTableId, InsertRowPlan insertRowPlan) {
-    return getResult();
+    this.successListener = new WALFlushListener(false, null);
+    this.successListener.succeed();
+    this.failListener = new WALFlushListener(false, null);
+    this.failListener.fail(cause);
   }
 
   @Override
   public WALFlushListener log(long memTableId, InsertRowNode insertRowNode) {
-    return getResult();
-  }
-
-  @Override
-  public WALFlushListener log(
-      long memTableId, InsertTabletPlan insertTabletPlan, int start, int end) {
     return getResult();
   }
 
@@ -64,21 +55,18 @@ public class WALFakeNode implements IWALNode {
   }
 
   @Override
-  public WALFlushListener log(long memTableId, DeletePlan deletePlan) {
+  public WALFlushListener log(long memTableId, DeleteDataNode deleteDataNode) {
     return getResult();
   }
 
   private WALFlushListener getResult() {
-    WALFlushListener walFlushListener = new WALFlushListener(false);
     switch (status) {
       case SUCCESS:
-        walFlushListener.succeed();
-        break;
+        return successListener;
       case FAILURE:
-        walFlushListener.fail(cause);
-        break;
+      default:
+        return failListener;
     }
-    return walFlushListener;
   }
 
   @Override
@@ -113,7 +101,17 @@ public class WALFakeNode implements IWALNode {
 
   @Override
   public long getCurrentSearchIndex() {
-    throw new UnsupportedOperationException();
+    return 0;
+  }
+
+  @Override
+  public long getCurrentWALFileVersion() {
+    return 0;
+  }
+
+  @Override
+  public long getTotalSize() {
+    return 0;
   }
 
   public static WALFakeNode getFailureInstance(Exception e) {

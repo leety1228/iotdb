@@ -23,6 +23,7 @@ import org.apache.iotdb.commons.exception.IllegalPathException;
 import org.apache.iotdb.commons.path.PartialPath;
 import org.apache.iotdb.db.mpp.common.FragmentInstanceId;
 import org.apache.iotdb.db.mpp.common.PlanFragmentId;
+import org.apache.iotdb.db.mpp.execution.exchange.sink.DownStreamChannelLocation;
 import org.apache.iotdb.db.mpp.plan.plan.node.PlanNodeDeserializeHelper;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeId;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.metedata.read.SchemaQueryMergeNode;
@@ -30,12 +31,13 @@ import org.apache.iotdb.db.mpp.plan.planner.plan.node.metedata.read.TimeSeriesSc
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.ExchangeNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.LimitNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.process.OffsetNode;
-import org.apache.iotdb.db.mpp.plan.planner.plan.node.sink.FragmentSinkNode;
+import org.apache.iotdb.db.mpp.plan.planner.plan.node.sink.IdentitySinkNode;
 
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.nio.ByteBuffer;
+import java.util.Collections;
 
 public class TimeSeriesSchemaScanNodeSerdeTest {
 
@@ -50,20 +52,23 @@ public class TimeSeriesSchemaScanNodeSerdeTest {
             new PlanNodeId("timeSeriesSchemaScan"),
             new PartialPath("root.sg.device0.sensor"),
             null,
-            null,
             10,
             0,
             false,
             false,
-            false);
-    FragmentSinkNode fragmentSinkNode = new FragmentSinkNode(new PlanNodeId("fragmentSink"));
-    fragmentSinkNode.addChild(timeSeriesSchemaScanNode);
-    fragmentSinkNode.setDownStream(
-        new TEndPoint("127.0.0.1", 6667),
-        new FragmentInstanceId(new PlanFragmentId("q", 1), "ds"),
-        new PlanNodeId("test"));
-    exchangeNode.addChild(schemaMergeNode);
-    exchangeNode.setRemoteSourceNode(fragmentSinkNode);
+            Collections.emptyMap());
+    IdentitySinkNode sinkNode =
+        new IdentitySinkNode(
+            new PlanNodeId("sink"),
+            Collections.singletonList(timeSeriesSchemaScanNode),
+            Collections.singletonList(
+                new DownStreamChannelLocation(
+                    new TEndPoint("127.0.0.1", 6667),
+                    new FragmentInstanceId(new PlanFragmentId("q", 1), "ds").toThrift(),
+                    new PlanNodeId("test").getId())));
+    schemaMergeNode.addChild(exchangeNode);
+    exchangeNode.addChild(sinkNode);
+    exchangeNode.setOutputColumnNames(exchangeNode.getChild().getOutputColumnNames());
     exchangeNode.setUpstream(
         new TEndPoint("127.0.0.1", 6667),
         new FragmentInstanceId(new PlanFragmentId("q", 1), "ds"),

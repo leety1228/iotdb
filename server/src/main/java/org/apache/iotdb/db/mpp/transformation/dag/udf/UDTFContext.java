@@ -21,12 +21,11 @@ package org.apache.iotdb.db.mpp.transformation.dag.udf;
 
 import org.apache.iotdb.commons.udf.service.UDFClassLoaderManager;
 import org.apache.iotdb.db.mpp.plan.expression.Expression;
-import org.apache.iotdb.db.mpp.plan.expression.ResultColumn;
 import org.apache.iotdb.db.mpp.plan.expression.multi.FunctionExpression;
+import org.apache.iotdb.db.service.TemporaryQueryDataFileService;
 
 import java.time.ZoneId;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 public class UDTFContext {
@@ -39,25 +38,21 @@ public class UDTFContext {
     this.zoneId = zoneId;
   }
 
-  public void constructUdfExecutors(List<ResultColumn> resultColumns) {
-    for (ResultColumn resultColumn : resultColumns) {
-      resultColumn.getExpression().constructUdfExecutors(expressionName2Executor, zoneId);
-    }
-  }
-
   public void constructUdfExecutors(Expression[] outputExpressions) {
     for (Expression expression : outputExpressions) {
       expression.constructUdfExecutors(expressionName2Executor, zoneId);
     }
   }
 
-  public void finalizeUDFExecutors(long queryId) {
+  public void finalizeUDFExecutors(String queryId) {
     try {
       for (UDTFExecutor executor : expressionName2Executor.values()) {
         executor.beforeDestroy();
       }
     } finally {
       UDFClassLoaderManager.getInstance().finalizeUDFQuery(queryId);
+      // close and delete UDF temp files
+      TemporaryQueryDataFileService.getInstance().deregister(queryId);
     }
   }
 

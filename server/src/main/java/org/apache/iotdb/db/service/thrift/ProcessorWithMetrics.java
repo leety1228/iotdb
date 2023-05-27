@@ -19,9 +19,9 @@
 
 package org.apache.iotdb.db.service.thrift;
 
-import org.apache.iotdb.db.service.metrics.MetricsService;
-import org.apache.iotdb.db.service.metrics.enums.Metric;
-import org.apache.iotdb.db.service.metrics.enums.Tag;
+import org.apache.iotdb.commons.service.metric.MetricService;
+import org.apache.iotdb.commons.service.metric.enums.Metric;
+import org.apache.iotdb.commons.service.metric.enums.Tag;
 import org.apache.iotdb.metrics.utils.MetricLevel;
 import org.apache.iotdb.service.rpc.thrift.IClientRPCService.Iface;
 import org.apache.iotdb.service.rpc.thrift.IClientRPCService.Processor;
@@ -48,7 +48,7 @@ public class ProcessorWithMetrics extends Processor {
   @Override
   public void process(TProtocol in, TProtocol out) throws TException {
     TMessage msg = in.readMessageBegin();
-    long startTime = System.currentTimeMillis();
+    long startTime = System.nanoTime();
     ProcessFunction fn = (ProcessFunction) getProcessMapView().get(msg.name);
     if (fn == null) {
       TProtocolUtil.skip(in, TType.STRUCT);
@@ -63,14 +63,13 @@ public class ProcessorWithMetrics extends Processor {
     } else {
       fn.process(msg.seqid, in, out, iface);
     }
-    long cost = System.currentTimeMillis() - startTime;
-    MetricsService.getInstance()
-        .getMetricManager()
+    long cost = System.nanoTime() - startTime;
+    MetricService.getInstance()
         .timer(
             cost,
-            TimeUnit.MILLISECONDS,
+            TimeUnit.NANOSECONDS,
             Metric.ENTRY.toString(),
-            MetricLevel.IMPORTANT,
+            MetricLevel.CORE,
             Tag.NAME.toString(),
             msg.name);
   }

@@ -25,10 +25,7 @@ import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeId;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeType;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanVisitor;
-import org.apache.iotdb.db.mpp.plan.planner.plan.node.sink.FragmentSinkNode;
 import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
-
-import com.google.common.collect.ImmutableList;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -37,12 +34,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-public class ExchangeNode extends PlanNode {
-  private PlanNode child;
-  // The remoteSourceNode is used to record the remote source info for current ExchangeNode
-  // It is not the child of current ExchangeNode
-  private FragmentSinkNode remoteSourceNode;
-
+public class ExchangeNode extends SingleChildProcessNode {
   // In current version, one ExchangeNode will only have one source.
   // And the fragment which the sourceNode belongs to will only have one instance.
   // Thus, by nodeId and endpoint, the ExchangeNode can know where its source from.
@@ -50,18 +42,18 @@ public class ExchangeNode extends PlanNode {
   private FragmentInstanceId upstreamInstanceId;
   private PlanNodeId upstreamPlanNodeId;
 
-  private List<String> outputColumnNames;
+  private List<String> outputColumnNames = new ArrayList<>();
+
+  /** Exchange needs to know which child of IdentitySinkNode/ShuffleSinkNode it matches */
+  private int indexOfUpstreamSinkHandle = 0;
 
   public ExchangeNode(PlanNodeId id) {
     super(id);
   }
 
   @Override
-  public List<PlanNode> getChildren() {
-    if (this.child == null) {
-      return ImmutableList.of();
-    }
-    return ImmutableList.of(child);
+  public int allowedChildCount() {
+    return CHILD_COUNT_NO_LIMIT;
   }
 
   @Override
@@ -70,24 +62,11 @@ public class ExchangeNode extends PlanNode {
   }
 
   @Override
-  public void addChild(PlanNode child) {
-    this.child = child;
-  }
-
-  @Override
   public PlanNode clone() {
     ExchangeNode node = new ExchangeNode(getPlanNodeId());
-    if (remoteSourceNode != null) {
-      FragmentSinkNode remoteSourceNodeClone = (FragmentSinkNode) remoteSourceNode.clone();
-      remoteSourceNodeClone.setDownStreamPlanNodeId(node.getPlanNodeId());
-      node.setRemoteSourceNode(remoteSourceNode);
-    }
+    node.setOutputColumnNames(outputColumnNames);
+    node.setIndexOfUpstreamSinkHandle(indexOfUpstreamSinkHandle);
     return node;
-  }
-
-  @Override
-  public int allowedChildCount() {
-    return CHILD_COUNT_NO_LIMIT;
   }
 
   @Override
@@ -117,10 +96,12 @@ public class ExchangeNode extends PlanNode {
       outputColumnNames.add(ReadWriteIOUtils.readString(byteBuffer));
       outputColumnNamesSize--;
     }
+    int index = ReadWriteIOUtils.readInt(byteBuffer);
     PlanNodeId planNodeId = PlanNodeId.deserialize(byteBuffer);
     ExchangeNode exchangeNode = new ExchangeNode(planNodeId);
     exchangeNode.setUpstream(endPoint, fragmentInstanceId, upstreamPlanNodeId);
     exchangeNode.setOutputColumnNames(outputColumnNames);
+    exchangeNode.setIndexOfUpstreamSinkHandle(index);
     return exchangeNode;
   }
 
@@ -135,6 +116,7 @@ public class ExchangeNode extends PlanNode {
     for (String outputColumnName : outputColumnNames) {
       ReadWriteIOUtils.write(outputColumnName, byteBuffer);
     }
+    ReadWriteIOUtils.write(indexOfUpstreamSinkHandle, byteBuffer);
   }
 
   @Override
@@ -148,14 +130,7 @@ public class ExchangeNode extends PlanNode {
     for (String outputColumnName : outputColumnNames) {
       ReadWriteIOUtils.write(outputColumnName, stream);
     }
-  }
-
-  public PlanNode getChild() {
-    return child;
-  }
-
-  public void setChild(PlanNode child) {
-    this.child = child;
+    ReadWriteIOUtils.write(indexOfUpstreamSinkHandle, stream);
   }
 
   @Override
@@ -173,17 +148,12 @@ public class ExchangeNode extends PlanNode {
         getUpstreamEndpoint().getIp(), getUpstreamInstanceId(), getUpstreamPlanNodeId());
   }
 
-  public FragmentSinkNode getRemoteSourceNode() {
-    return remoteSourceNode;
+  public int getIndexOfUpstreamSinkHandle() {
+    return indexOfUpstreamSinkHandle;
   }
 
-  public void setRemoteSourceNode(FragmentSinkNode remoteSourceNode) {
-    this.remoteSourceNode = remoteSourceNode;
-    this.setOutputColumnNames(remoteSourceNode.getOutputColumnNames());
-  }
-
-  public void cleanChildren() {
-    this.child = null;
+  public void setIndexOfUpstreamSinkHandle(int indexOfUpstreamSinkHandle) {
+    this.indexOfUpstreamSinkHandle = indexOfUpstreamSinkHandle;
   }
 
   public TEndPoint getUpstreamEndpoint() {
@@ -210,15 +180,13 @@ public class ExchangeNode extends PlanNode {
       return false;
     }
     ExchangeNode that = (ExchangeNode) o;
-    return Objects.equals(child, that.child)
-        && Objects.equals(upstreamEndpoint, that.upstreamEndpoint)
+    return Objects.equals(upstreamEndpoint, that.upstreamEndpoint)
         && Objects.equals(upstreamInstanceId, that.upstreamInstanceId)
         && Objects.equals(upstreamPlanNodeId, that.upstreamPlanNodeId);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(
-        super.hashCode(), child, upstreamEndpoint, upstreamInstanceId, upstreamPlanNodeId);
+    return Objects.hash(super.hashCode(), upstreamEndpoint, upstreamInstanceId, upstreamPlanNodeId);
   }
 }

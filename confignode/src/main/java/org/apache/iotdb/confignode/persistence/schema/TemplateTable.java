@@ -21,8 +21,15 @@ package org.apache.iotdb.confignode.persistence.schema;
 
 import org.apache.iotdb.commons.exception.MetadataException;
 import org.apache.iotdb.commons.utils.TestOnly;
+import org.apache.iotdb.db.exception.metadata.template.UndefinedTemplateException;
 import org.apache.iotdb.db.metadata.template.Template;
+import org.apache.iotdb.db.metadata.template.alter.TemplateExtendInfo;
+import org.apache.iotdb.tsfile.common.conf.TSFileDescriptor;
+import org.apache.iotdb.tsfile.file.metadata.enums.CompressionType;
+import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
+import org.apache.iotdb.tsfile.file.metadata.enums.TSEncoding;
 import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
+import org.apache.iotdb.tsfile.write.schema.IMeasurementSchema;
 
 import org.apache.commons.io.IOUtils;
 import org.slf4j.Logger;
@@ -45,17 +52,19 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import static org.apache.iotdb.db.utils.EncodingInferenceUtils.getDefaultEncoding;
+
 public class TemplateTable {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(TemplateTable.class);
 
-  // StorageGroup read write lock
   private final ReentrantReadWriteLock templateReadWriteLock;
 
   private final AtomicInteger templateIdGenerator;
   private final Map<String, Template> templateMap = new ConcurrentHashMap<>();
+  private final Map<Integer, Template> templateIdMap = new ConcurrentHashMap<>();
 
-  private final String snapshotFileName = "template_info.bin";
+  private static final String SNAPSHOT_FILENAME = "template_info.bin";
 
   public TemplateTable() {
     templateReadWriteLock = new ReentrantReadWriteLock();
@@ -67,9 +76,23 @@ public class TemplateTable {
       templateReadWriteLock.readLock().lock();
       Template template = templateMap.get(name);
       if (template == null) {
-        throw new MetadataException(String.format("Template %s not exits", name));
+        throw new MetadataException(String.format("Template %s does not exist", name));
       }
       return templateMap.get(name);
+    } finally {
+      templateReadWriteLock.readLock().unlock();
+    }
+  }
+
+  public Template getTemplate(int templateId) throws MetadataException {
+    try {
+      templateReadWriteLock.readLock().lock();
+      Template template = templateIdMap.get(templateId);
+      if (template == null) {
+        throw new MetadataException(
+            String.format("Template with id=%s does not exist", templateId));
+      }
+      return template;
     } finally {
       templateReadWriteLock.readLock().unlock();
     }
@@ -95,6 +118,60 @@ public class TemplateTable {
       }
       template.setId(templateIdGenerator.getAndIncrement());
       this.templateMap.put(template.getName(), template);
+      templateIdMap.put(template.getId(), template);
+    } finally {
+      templateReadWriteLock.writeLock().unlock();
+    }
+  }
+
+  public void dropTemplate(String templateName) throws MetadataException {
+    try {
+      templateReadWriteLock.writeLock().lock();
+      Template temp = this.templateMap.remove(templateName);
+      if (temp == null) {
+        LOGGER.error("Undefined template {}", templateName);
+        throw new UndefinedTemplateException(templateName);
+      }
+      templateIdMap.remove(temp.getId());
+    } finally {
+      templateReadWriteLock.writeLock().unlock();
+    }
+  }
+
+  public void extendTemplate(TemplateExtendInfo templateExtendInfo) throws MetadataException {
+    templateReadWriteLock.writeLock().lock();
+    try {
+      Template template = templateMap.get(templateExtendInfo.getTemplateName());
+      List<String> measurementList = templateExtendInfo.getMeasurements();
+      List<TSDataType> dataTypeList = templateExtendInfo.getDataTypes();
+      List<TSEncoding> encodingList = templateExtendInfo.getEncodings();
+      List<CompressionType> compressionTypeList = templateExtendInfo.getCompressors();
+
+      IMeasurementSchema measurementSchema;
+      for (int i = 0; i < measurementList.size(); i++) {
+        measurementSchema = template.getSchema(measurementList.get(i));
+        if (measurementSchema == null) {
+          template.addMeasurement(
+              measurementList.get(i),
+              dataTypeList.get(i),
+              encodingList == null ? getDefaultEncoding(dataTypeList.get(i)) : encodingList.get(i),
+              compressionTypeList == null
+                  ? TSFileDescriptor.getInstance().getConfig().getCompressor()
+                  : compressionTypeList.get(i));
+        } else {
+          if (!measurementSchema.getType().equals(dataTypeList.get(i))
+              || (encodingList != null
+                  && !measurementSchema.getEncodingType().equals(encodingList.get(i)))
+              || (compressionTypeList != null
+                  && !measurementSchema.getCompressor().equals(compressionTypeList.get(i)))) {
+            throw new MetadataException(
+                String.format(
+                    "Schema of measurement %s is not compatible with existing measurement in template %s",
+                    measurementList.get(i), template.getName()));
+          }
+        }
+      }
+
     } finally {
       templateReadWriteLock.writeLock().unlock();
     }
@@ -123,6 +200,7 @@ public class TemplateTable {
     while (size > 0) {
       Template template = deserializeTemplate(byteBuffer);
       templateMap.put(template.getName(), template);
+      templateIdMap.put(template.getId(), template);
       size--;
     }
   }
@@ -134,7 +212,7 @@ public class TemplateTable {
   }
 
   public boolean processTakeSnapshot(File snapshotDir) throws IOException {
-    File snapshotFile = new File(snapshotDir, snapshotFileName);
+    File snapshotFile = new File(snapshotDir, SNAPSHOT_FILENAME);
     if (snapshotFile.exists() && snapshotFile.isFile()) {
       LOGGER.error(
           "template failed to take snapshot, because snapshot file [{}] is already exist.",
@@ -165,7 +243,7 @@ public class TemplateTable {
   }
 
   public void processLoadSnapshot(File snapshotDir) throws IOException {
-    File snapshotFile = new File(snapshotDir, snapshotFileName);
+    File snapshotFile = new File(snapshotDir, SNAPSHOT_FILENAME);
     if (!snapshotFile.exists() || !snapshotFile.isFile()) {
       LOGGER.error(
           "Failed to load snapshot,snapshot file [{}] is not exist.",

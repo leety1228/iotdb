@@ -19,28 +19,34 @@
 
 package org.apache.iotdb.db.mpp.common.schematree;
 
+import org.apache.iotdb.commons.path.MeasurementPath;
 import org.apache.iotdb.commons.path.PartialPath;
+import org.apache.iotdb.commons.schema.view.LogicalViewSchema;
 import org.apache.iotdb.commons.utils.PathUtils;
 import org.apache.iotdb.commons.utils.TestOnly;
-import org.apache.iotdb.db.conf.IoTDBDescriptor;
-import org.apache.iotdb.db.metadata.path.MeasurementPath;
+import org.apache.iotdb.db.exception.metadata.PathNotExistException;
 import org.apache.iotdb.db.mpp.common.schematree.node.SchemaEntityNode;
 import org.apache.iotdb.db.mpp.common.schematree.node.SchemaInternalNode;
 import org.apache.iotdb.db.mpp.common.schematree.node.SchemaMeasurementNode;
 import org.apache.iotdb.db.mpp.common.schematree.node.SchemaNode;
 import org.apache.iotdb.db.mpp.common.schematree.visitor.SchemaTreeDeviceVisitor;
-import org.apache.iotdb.db.mpp.common.schematree.visitor.SchemaTreeMeasurementVisitor;
+import org.apache.iotdb.db.mpp.common.schematree.visitor.SchemaTreeVisitorFactory;
+import org.apache.iotdb.db.mpp.common.schematree.visitor.SchemaTreeVisitorWithLimitOffsetWrapper;
+import org.apache.iotdb.db.mpp.plan.analyze.schema.ISchemaComputation;
 import org.apache.iotdb.tsfile.utils.Pair;
 import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
-import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
+import org.apache.iotdb.tsfile.write.schema.IMeasurementSchema;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.rmi.UnexpectedException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.apache.iotdb.commons.conf.IoTDBConstant.PATH_ROOT;
 import static org.apache.iotdb.db.metadata.MetadataConstant.ALL_MATCH_PATTERN;
@@ -49,9 +55,12 @@ import static org.apache.iotdb.db.mpp.common.schematree.node.SchemaNode.SCHEMA_M
 
 public class ClusterSchemaTree implements ISchemaTree {
 
-  private List<String> storageGroups;
+  private Set<String> databases;
 
   private final SchemaNode root;
+
+  /** a flag recording whether there is logical view in this schema tree. */
+  private boolean hasLogicalMeasurementPath = false;
 
   public ClusterSchemaTree() {
     root = new SchemaInternalNode(PATH_ROOT);
@@ -71,24 +80,22 @@ public class ClusterSchemaTree implements ISchemaTree {
   @Override
   public Pair<List<MeasurementPath>, Integer> searchMeasurementPaths(
       PartialPath pathPattern, int slimit, int soffset, boolean isPrefixMatch) {
-    SchemaTreeMeasurementVisitor visitor =
-        new SchemaTreeMeasurementVisitor(root, pathPattern, slimit, soffset, isPrefixMatch);
-    return new Pair<>(visitor.getAllResult(), visitor.getNextOffset());
+    try (SchemaTreeVisitorWithLimitOffsetWrapper<MeasurementPath> visitor =
+        SchemaTreeVisitorFactory.createSchemaTreeMeasurementVisitor(
+            root, pathPattern, isPrefixMatch, slimit, soffset)) {
+      return new Pair<>(visitor.getAllResult(), visitor.getNextOffset());
+    }
   }
 
   @Override
   public Pair<List<MeasurementPath>, Integer> searchMeasurementPaths(PartialPath pathPattern) {
-    SchemaTreeMeasurementVisitor visitor =
-        new SchemaTreeMeasurementVisitor(
-            root,
-            pathPattern,
-            IoTDBDescriptor.getInstance().getConfig().getMaxQueryDeduplicatedPathNum() + 1,
-            0,
-            false);
-    return new Pair<>(visitor.getAllResult(), visitor.getNextOffset());
+    try (SchemaTreeVisitorWithLimitOffsetWrapper<MeasurementPath> visitor =
+        SchemaTreeVisitorFactory.createSchemaTreeMeasurementVisitor(
+            root, pathPattern, false, 0, 0)) {
+      return new Pair<>(visitor.getAllResult(), visitor.getNextOffset());
+    }
   }
 
-  @Override
   public List<MeasurementPath> getAllMeasurement() {
     return searchMeasurementPaths(ALL_MATCH_PATTERN, 0, 0, false).left;
   }
@@ -101,14 +108,18 @@ public class ClusterSchemaTree implements ISchemaTree {
    */
   @Override
   public List<DeviceSchemaInfo> getMatchedDevices(PartialPath pathPattern, boolean isPrefixMatch) {
-    SchemaTreeDeviceVisitor visitor = new SchemaTreeDeviceVisitor(root, pathPattern, isPrefixMatch);
-    return visitor.getAllResult();
+    try (SchemaTreeDeviceVisitor visitor =
+        SchemaTreeVisitorFactory.createSchemaTreeDeviceVisitor(root, pathPattern, isPrefixMatch)) {
+      return visitor.getAllResult();
+    }
   }
 
   @Override
   public List<DeviceSchemaInfo> getMatchedDevices(PartialPath pathPattern) {
-    SchemaTreeDeviceVisitor visitor = new SchemaTreeDeviceVisitor(root, pathPattern, false);
-    return visitor.getAllResult();
+    try (SchemaTreeDeviceVisitor visitor =
+        SchemaTreeVisitorFactory.createSchemaTreeDeviceVisitor(root, pathPattern, false)) {
+      return visitor.getAllResult();
+    }
   }
 
   @Override
@@ -128,18 +139,97 @@ public class ClusterSchemaTree implements ISchemaTree {
       return null;
     }
 
-    List<SchemaMeasurementNode> measurementNodeList = new ArrayList<>();
+    List<MeasurementSchemaInfo> measurementSchemaInfoList = new ArrayList<>();
     SchemaNode node;
+    SchemaMeasurementNode measurementNode;
     for (String measurement : measurements) {
       node = cur.getChild(measurement);
       if (node == null) {
-        measurementNodeList.add(null);
+        measurementSchemaInfoList.add(null);
       } else {
-        measurementNodeList.add(node.getAsMeasurementNode());
+        measurementNode = node.getAsMeasurementNode();
+        measurementSchemaInfoList.add(
+            new MeasurementSchemaInfo(
+                measurementNode.getName(),
+                measurementNode.getSchema(),
+                measurementNode.getAlias()));
       }
     }
 
-    return new DeviceSchemaInfo(devicePath, cur.getAsEntityNode().isAligned(), measurementNodeList);
+    return new DeviceSchemaInfo(
+        devicePath, cur.getAsEntityNode().isAligned(), measurementSchemaInfoList);
+  }
+
+  public List<Integer> compute(
+      ISchemaComputation schemaComputation, List<Integer> indexOfTargetMeasurements) {
+    PartialPath devicePath = schemaComputation.getDevicePath();
+    String[] measurements = schemaComputation.getMeasurements();
+
+    String[] nodes = devicePath.getNodes();
+    SchemaNode cur = root;
+    for (int i = 1; i < nodes.length; i++) {
+      if (cur == null) {
+        return indexOfTargetMeasurements;
+      }
+      cur = cur.getChild(nodes[i]);
+    }
+    if (cur == null) {
+      return indexOfTargetMeasurements;
+    }
+    if (cur.isEntity()) {
+      schemaComputation.computeDevice(cur.getAsEntityNode().isAligned());
+    }
+    List<Integer> indexOfMissingMeasurements = new ArrayList<>();
+    SchemaNode node;
+    for (int index : indexOfTargetMeasurements) {
+      node = cur.getChild(measurements[index]);
+      if (node == null) {
+        indexOfMissingMeasurements.add(index);
+      } else {
+        schemaComputation.computeMeasurement(index, node.getAsMeasurementNode());
+      }
+    }
+    return indexOfMissingMeasurements;
+  }
+
+  /**
+   * This function compute logical view and fill source of these views. It returns nothing ! If some
+   * source paths are missed, throw errors.
+   *
+   * @param schemaComputation the statement
+   * @param indexOfTargetLogicalView the index list of logicalViewSchemaList that you want to check
+   */
+  public void computeSourceOfLogicalView(
+      ISchemaComputation schemaComputation, List<Integer> indexOfTargetLogicalView) {
+    if (!schemaComputation.hasLogicalViewNeedProcess()) {
+      return;
+    }
+    List<LogicalViewSchema> logicalViewSchemaList = schemaComputation.getLogicalViewSchemaList();
+    for (Integer index : indexOfTargetLogicalView) {
+      LogicalViewSchema logicalViewSchema = logicalViewSchemaList.get(index);
+      PartialPath fullPath = logicalViewSchema.getSourcePathIfWritable();
+      Pair<List<MeasurementPath>, Integer> searchResult = this.searchMeasurementPaths(fullPath);
+      List<MeasurementPath> measurementPathList = searchResult.left;
+      if (measurementPathList.size() <= 0) {
+        throw new RuntimeException(
+            new PathNotExistException(
+                String.format(
+                    "The source path of view [%s] does not exist.", fullPath.getFullPath())));
+      } else if (measurementPathList.size() > 1) {
+        throw new RuntimeException(
+            new UnexpectedException(
+                String.format(
+                    "The source paths of view [%s] are multiple.", fullPath.getFullPath())));
+      } else {
+        Integer realIndex = schemaComputation.getIndexListOfLogicalViewPaths().get(index);
+        MeasurementPath measurementPath = measurementPathList.get(0);
+        schemaComputation.computeMeasurementOfView(
+            realIndex,
+            new MeasurementSchemaInfo(
+                measurementPath.getMeasurement(), measurementPath.getMeasurementSchema(), null),
+            measurementPath.isUnderAlignedEntity());
+      }
+    }
   }
 
   public void appendMeasurementPaths(List<MeasurementPath> measurementPathList) {
@@ -151,13 +241,18 @@ public class ClusterSchemaTree implements ISchemaTree {
   private void appendSingleMeasurementPath(MeasurementPath measurementPath) {
     appendSingleMeasurement(
         measurementPath,
-        (MeasurementSchema) measurementPath.getMeasurementSchema(),
+        measurementPath.getMeasurementSchema(),
+        measurementPath.getTagMap(),
         measurementPath.isMeasurementAliasExists() ? measurementPath.getMeasurementAlias() : null,
         measurementPath.isUnderAlignedEntity());
   }
 
   public void appendSingleMeasurement(
-      PartialPath path, MeasurementSchema schema, String alias, boolean isAligned) {
+      PartialPath path,
+      IMeasurementSchema schema,
+      Map<String, String> tagMap,
+      String alias,
+      boolean isAligned) {
     String[] nodes = path.getNodes();
     SchemaNode cur = root;
     SchemaNode child;
@@ -170,7 +265,9 @@ public class ClusterSchemaTree implements ISchemaTree {
             measurementNode.setAlias(alias);
             cur.getAsEntityNode().addAliasChild(alias, measurementNode);
           }
+          measurementNode.setTagMap(tagMap);
           child = measurementNode;
+          this.hasLogicalMeasurementPath = true;
         } else if (i == nodes.length - 2) {
           SchemaEntityNode entityNode = new SchemaEntityNode(nodes[i]);
           entityNode.setAligned(isAligned);
@@ -182,13 +279,30 @@ public class ClusterSchemaTree implements ISchemaTree {
       } else if (i == nodes.length - 2 && !child.isEntity()) {
         SchemaEntityNode entityNode = new SchemaEntityNode(nodes[i]);
         cur.replaceChild(nodes[i], entityNode);
+        if (!entityNode.isAligned()) {
+          entityNode.setAligned(isAligned);
+        }
         child = entityNode;
       }
       cur = child;
     }
   }
 
+  @Override
+  public void mergeSchemaTree(ISchemaTree schemaTree) {
+    if (schemaTree instanceof ClusterSchemaTree) {
+      this.mergeSchemaTree((ClusterSchemaTree) schemaTree);
+    }
+  }
+
+  @Override
+  public boolean hasLogicalViewMeasurement() {
+    return this.hasLogicalMeasurementPath;
+  }
+
   public void mergeSchemaTree(ClusterSchemaTree schemaTree) {
+    this.hasLogicalMeasurementPath =
+        this.hasLogicalMeasurementPath || schemaTree.hasLogicalViewMeasurement();
     traverseAndMerge(this.root, null, schemaTree.root);
   }
 
@@ -232,12 +346,16 @@ public class ClusterSchemaTree implements ISchemaTree {
     int childNum;
     Deque<SchemaNode> stack = new ArrayDeque<>();
     SchemaNode child;
+    boolean hasLogicalView = false;
 
     while (inputStream.available() > 0) {
       nodeType = ReadWriteIOUtils.readByte(inputStream);
       if (nodeType == SCHEMA_MEASUREMENT_NODE) {
         SchemaMeasurementNode measurementNode = SchemaMeasurementNode.deserialize(inputStream);
         stack.push(measurementNode);
+        if (measurementNode.isLogicalView()) {
+          hasLogicalView = true;
+        }
       } else {
         SchemaInternalNode internalNode;
         if (nodeType == SCHEMA_ENTITY_NODE) {
@@ -263,39 +381,42 @@ public class ClusterSchemaTree implements ISchemaTree {
         stack.push(internalNode);
       }
     }
-    return new ClusterSchemaTree(stack.poll());
+    ClusterSchemaTree result = new ClusterSchemaTree(stack.poll());
+    result.hasLogicalMeasurementPath = hasLogicalView;
+    return result;
   }
 
   /**
-   * Get storage group name by path
+   * Get database name by path
    *
-   * <p>e.g., root.sg1 is a storage group and path = root.sg1.d1, return root.sg1
+   * <p>e.g., root.sg1 is a database and path = root.sg1.d1, return root.sg1
    *
    * @param pathName only full path, cannot be path pattern
-   * @return storage group in the given path
+   * @return database in the given path
    */
   @Override
-  public String getBelongedStorageGroup(String pathName) {
-    for (String storageGroup : storageGroups) {
-      if (PathUtils.isStartWith(pathName, storageGroup)) {
-        return storageGroup;
+  public String getBelongedDatabase(String pathName) {
+    for (String database : databases) {
+      if (PathUtils.isStartWith(pathName, database)) {
+        return database;
       }
     }
-    throw new RuntimeException("No matched storage group. Please check the path " + pathName);
+    throw new RuntimeException("No matched database. Please check the path " + pathName);
   }
 
   @Override
-  public String getBelongedStorageGroup(PartialPath path) {
-    return getBelongedStorageGroup(path.getFullPath());
+  public String getBelongedDatabase(PartialPath path) {
+    return getBelongedDatabase(path.getFullPath());
   }
 
   @Override
-  public List<String> getStorageGroups() {
-    return storageGroups;
+  public Set<String> getDatabases() {
+    return databases;
   }
 
-  public void setStorageGroups(List<String> storageGroups) {
-    this.storageGroups = storageGroups;
+  @Override
+  public void setDatabases(Set<String> databases) {
+    this.databases = databases;
   }
 
   @TestOnly

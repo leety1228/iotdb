@@ -18,6 +18,7 @@
  */
 package org.apache.iotdb.tsfile.read.filter.operator;
 
+import org.apache.iotdb.tsfile.common.conf.TSFileDescriptor;
 import org.apache.iotdb.tsfile.file.metadata.statistics.Statistics;
 import org.apache.iotdb.tsfile.read.filter.basic.Filter;
 import org.apache.iotdb.tsfile.read.filter.factory.FilterSerializeId;
@@ -26,6 +27,7 @@ import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.regex.Pattern;
@@ -36,7 +38,9 @@ import java.util.regex.PatternSyntaxException;
  *
  * @param <T> comparable data type
  */
-public class Regexp<T extends Comparable<T>> implements Filter {
+public class Regexp<T extends Comparable<T>> implements Filter, Serializable {
+
+  private static final long serialVersionUID = -1168073851950524983L;
 
   protected String value;
 
@@ -44,11 +48,14 @@ public class Regexp<T extends Comparable<T>> implements Filter {
 
   protected Pattern pattern;
 
+  protected boolean not;
+
   public Regexp() {}
 
-  public Regexp(String value, FilterType filterType) {
+  public Regexp(String value, FilterType filterType, boolean not) {
     this.value = value;
     this.filterType = filterType;
+    this.not = not;
     try {
       this.pattern = Pattern.compile(this.value);
     } catch (PatternSyntaxException e) {
@@ -62,11 +69,16 @@ public class Regexp<T extends Comparable<T>> implements Filter {
   }
 
   @Override
+  public boolean allSatisfy(Statistics statistics) {
+    return false;
+  }
+
+  @Override
   public boolean satisfy(long time, Object value) {
     if (filterType != FilterType.VALUE_FILTER) {
-      return false;
+      throw new UnsupportedOperationException("");
     }
-    return pattern.matcher(value.toString()).find();
+    return not != pattern.matcher(new MatcherInput(value.toString(), new AccessCount())).find();
   }
 
   @Override
@@ -76,12 +88,12 @@ public class Regexp<T extends Comparable<T>> implements Filter {
 
   @Override
   public boolean containStartEndTime(long startTime, long endTime) {
-    return true;
+    return false;
   }
 
   @Override
   public Filter copy() {
-    return new Regexp(value, filterType);
+    return new Regexp<>(value, filterType, not);
   }
 
   @Override
@@ -90,8 +102,9 @@ public class Regexp<T extends Comparable<T>> implements Filter {
       outputStream.write(getSerializeId().ordinal());
       outputStream.write(filterType.ordinal());
       ReadWriteIOUtils.write(value, outputStream);
-    } catch (IOException ex) {
-      throw new IllegalArgumentException("Failed to serialize outputStream of type:", ex);
+      ReadWriteIOUtils.write(not, outputStream);
+    } catch (IOException ignored) {
+      // ignore
     }
   }
 
@@ -99,6 +112,7 @@ public class Regexp<T extends Comparable<T>> implements Filter {
   public void deserialize(ByteBuffer buffer) {
     filterType = FilterType.values()[buffer.get()];
     value = ReadWriteIOUtils.readString(buffer);
+    not = ReadWriteIOUtils.readBool(buffer);
     if (value != null) {
       try {
         this.pattern = Pattern.compile(value);
@@ -110,18 +124,75 @@ public class Regexp<T extends Comparable<T>> implements Filter {
 
   @Override
   public String toString() {
-    return filterType + " is " + value;
-  }
-
-  @Override
-  public boolean equals(Object o) {
-    return o instanceof Regexp
-        && Objects.equals(((Regexp<?>) o).value, value)
-        && ((Regexp<?>) o).filterType == filterType;
+    return filterType + (not ? " not match " : " match ") + value;
   }
 
   @Override
   public FilterSerializeId getSerializeId() {
     return FilterSerializeId.REGEXP;
+  }
+
+  @Override
+  public Filter reverse() {
+    return new Regexp<>(value, filterType, !not);
+  }
+
+  @Override
+  public boolean equals(Object o) {
+    if (!(o instanceof Regexp)) {
+      return false;
+    }
+    Regexp<?> regexp = (Regexp<?>) o;
+    return not == regexp.not && value.equals(regexp.value) && filterType == regexp.filterType;
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(value, filterType, not);
+  }
+
+  public static class AccessCount {
+    private int count;
+    private final int accessThreshold =
+        TSFileDescriptor.getInstance().getConfig().getPatternMatchingThreshold();
+
+    public void check() throws IllegalStateException {
+      if (this.count++ > accessThreshold) {
+        throw new IllegalStateException("Pattern access threshold exceeded");
+      }
+    }
+  }
+
+  public static class MatcherInput implements CharSequence {
+
+    private final CharSequence value;
+
+    private final AccessCount access;
+
+    public MatcherInput(CharSequence value, AccessCount access) {
+      this.value = value;
+      this.access = access;
+    }
+
+    @Override
+    public char charAt(int index) {
+      this.access.check();
+      return this.value.charAt(index);
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int end) {
+      return new MatcherInput(this.value.subSequence(start, end), this.access);
+    }
+
+    @Override
+    public int length() {
+      return this.value.length();
+    }
+
+    @Override
+    public String toString() {
+      return this.value.toString();
+    }
   }
 }

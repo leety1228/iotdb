@@ -66,14 +66,14 @@ public class SchemaFetchMergeOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
+  public TsBlock next() throws Exception {
     if (isReadingStorageGroupInfo) {
       isReadingStorageGroupInfo = false;
       return generateStorageGroupInfo();
     }
 
-    if (children.get(currentIndex).hasNext()) {
-      return children.get(currentIndex).next();
+    if (children.get(currentIndex).hasNextWithTimer()) {
+      return children.get(currentIndex).nextWithTimer();
     } else {
       currentIndex++;
       return null;
@@ -81,7 +81,7 @@ public class SchemaFetchMergeOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean hasNext() {
+  public boolean hasNext() throws Exception {
     return isReadingStorageGroupInfo || currentIndex < childrenCount;
   }
 
@@ -93,8 +93,8 @@ public class SchemaFetchMergeOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean isFinished() {
-    return !hasNext();
+  public boolean isFinished() throws Exception {
+    return !hasNextWithTimer();
   }
 
   @Override
@@ -107,7 +107,7 @@ public class SchemaFetchMergeOperator implements ProcessOperator {
   private TsBlock generateStorageGroupInfo() {
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
     try {
-      // to indicate this binary data is storage group info
+      // to indicate this binary data is database info
       ReadWriteIOUtils.write((byte) 0, outputStream);
 
       ReadWriteIOUtils.write(storageGroupList.size(), outputStream);
@@ -120,8 +120,35 @@ public class SchemaFetchMergeOperator implements ProcessOperator {
     return new TsBlock(
         new TimeColumn(1, new long[] {0}),
         new BinaryColumn(
-            1,
-            Optional.of(new boolean[] {false}),
-            new Binary[] {new Binary(outputStream.toByteArray())}));
+            1, Optional.empty(), new Binary[] {new Binary(outputStream.toByteArray())}));
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    long childrenMaxPeekMemory = 0;
+    for (Operator child : children) {
+      childrenMaxPeekMemory = Math.max(childrenMaxPeekMemory, child.calculateMaxPeekMemory());
+    }
+
+    return childrenMaxPeekMemory;
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    long childrenMaxReturnSize = 0;
+    for (Operator child : children) {
+      childrenMaxReturnSize = Math.max(childrenMaxReturnSize, child.calculateMaxReturnSize());
+    }
+
+    return childrenMaxReturnSize;
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    long retainedSize = 0L;
+    for (Operator child : children) {
+      retainedSize += child.calculateRetainedSizeAfterCallingNext();
+    }
+    return retainedSize;
   }
 }

@@ -22,10 +22,10 @@ package org.apache.iotdb.db.mpp.aggregation;
 import org.apache.iotdb.tsfile.exception.write.UnSupportedDataTypeException;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.file.metadata.statistics.Statistics;
-import org.apache.iotdb.tsfile.read.common.TimeRange;
 import org.apache.iotdb.tsfile.read.common.block.column.Column;
 import org.apache.iotdb.tsfile.read.common.block.column.ColumnBuilder;
 import org.apache.iotdb.tsfile.utils.Binary;
+import org.apache.iotdb.tsfile.utils.BitMap;
 import org.apache.iotdb.tsfile.utils.TsPrimitiveType;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -44,20 +44,26 @@ public class LastValueAccumulator implements Accumulator {
 
   // Column should be like: | Time | Value |
   @Override
-  public int addInput(Column[] column, TimeRange timeRange) {
+  public void addInput(Column[] column, BitMap bitMap, int lastIndex) {
     switch (seriesDataType) {
       case INT32:
-        return addIntInput(column, timeRange);
+        addIntInput(column, bitMap, lastIndex);
+        return;
       case INT64:
-        return addLongInput(column, timeRange);
+        addLongInput(column, bitMap, lastIndex);
+        return;
       case FLOAT:
-        return addFloatInput(column, timeRange);
+        addFloatInput(column, bitMap, lastIndex);
+        return;
       case DOUBLE:
-        return addDoubleInput(column, timeRange);
+        addDoubleInput(column, bitMap, lastIndex);
+        return;
       case TEXT:
-        return addBinaryInput(column, timeRange);
+        addBinaryInput(column, bitMap, lastIndex);
+        return;
       case BOOLEAN:
-        return addBooleanInput(column, timeRange);
+        addBooleanInput(column, bitMap, lastIndex);
+        return;
       default:
         throw new UnSupportedDataTypeException(
             String.format("Unsupported data type in LastValue: %s", seriesDataType));
@@ -130,7 +136,32 @@ public class LastValueAccumulator implements Accumulator {
   @Override
   public void setFinal(Column finalResult) {
     reset();
-    lastValue.setObject(finalResult.getObject(0));
+    if (!finalResult.isNull(0)) {
+      initResult = true;
+      switch (seriesDataType) {
+        case INT32:
+          lastValue.setInt(finalResult.getInt(0));
+          break;
+        case INT64:
+          lastValue.setLong(finalResult.getLong(0));
+          break;
+        case FLOAT:
+          lastValue.setFloat(finalResult.getFloat(0));
+          break;
+        case DOUBLE:
+          lastValue.setDouble(finalResult.getDouble(0));
+          break;
+        case TEXT:
+          lastValue.setBinary(finalResult.getBinary(0));
+          break;
+        case BOOLEAN:
+          lastValue.setBoolean(finalResult.getBoolean(0));
+          break;
+        default:
+          throw new UnSupportedDataTypeException(
+              String.format("Unsupported data type in LastValue: %s", seriesDataType));
+      }
+    }
   }
 
   // columnBuilder should be double in LastValueAccumulator
@@ -221,20 +252,15 @@ public class LastValueAccumulator implements Accumulator {
     return lastValue.getDataType();
   }
 
-  protected int addIntInput(Column[] column, TimeRange timeRange) {
-    int curPositionCount = column[0].getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  protected void addIntInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateIntLastValue(column[1].getInt(i), curTime);
+        updateIntLastValue(column[1].getInt(i), column[0].getLong(i));
       }
     }
-    return column[0].getPositionCount();
   }
 
   protected void updateIntLastValue(int value, long curTime) {
@@ -245,20 +271,15 @@ public class LastValueAccumulator implements Accumulator {
     }
   }
 
-  protected int addLongInput(Column[] column, TimeRange timeRange) {
-    int curPositionCount = column[0].getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  protected void addLongInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateLongLastValue(column[1].getLong(i), curTime);
+        updateLongLastValue(column[1].getLong(i), column[0].getLong(i));
       }
     }
-    return column[0].getPositionCount();
   }
 
   protected void updateLongLastValue(long value, long curTime) {
@@ -269,20 +290,15 @@ public class LastValueAccumulator implements Accumulator {
     }
   }
 
-  protected int addFloatInput(Column[] column, TimeRange timeRange) {
-    int curPositionCount = column[0].getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  protected void addFloatInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateFloatLastValue(column[1].getFloat(i), curTime);
+        updateFloatLastValue(column[1].getFloat(i), column[0].getLong(i));
       }
     }
-    return column[0].getPositionCount();
   }
 
   protected void updateFloatLastValue(float value, long curTime) {
@@ -293,20 +309,15 @@ public class LastValueAccumulator implements Accumulator {
     }
   }
 
-  protected int addDoubleInput(Column[] column, TimeRange timeRange) {
-    int curPositionCount = column[0].getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  protected void addDoubleInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateDoubleLastValue(column[1].getDouble(i), curTime);
+        updateDoubleLastValue(column[1].getDouble(i), column[0].getLong(i));
       }
     }
-    return column[0].getPositionCount();
   }
 
   protected void updateDoubleLastValue(double value, long curTime) {
@@ -317,20 +328,15 @@ public class LastValueAccumulator implements Accumulator {
     }
   }
 
-  protected int addBooleanInput(Column[] column, TimeRange timeRange) {
-    int curPositionCount = column[0].getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  protected void addBooleanInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateBooleanLastValue(column[1].getBoolean(i), curTime);
+        updateBooleanLastValue(column[1].getBoolean(i), column[0].getLong(i));
       }
     }
-    return column[0].getPositionCount();
   }
 
   protected void updateBooleanLastValue(boolean value, long curTime) {
@@ -341,20 +347,15 @@ public class LastValueAccumulator implements Accumulator {
     }
   }
 
-  protected int addBinaryInput(Column[] column, TimeRange timeRange) {
-    int curPositionCount = column[0].getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  protected void addBinaryInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateBinaryLastValue(column[1].getBinary(i), curTime);
+        updateBinaryLastValue(column[1].getBinary(i), column[0].getLong(i));
       }
     }
-    return column[0].getPositionCount();
   }
 
   protected void updateBinaryLastValue(Binary value, long curTime) {

@@ -16,7 +16,10 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+
 package org.apache.iotdb.confignode.conf;
+
+import java.io.File;
 
 public class ConfigNodeConstant {
 
@@ -31,12 +34,21 @@ public class ConfigNodeConstant {
   public static final String JMX_TYPE = "type";
   public static final String CONFIGNODE_JMX_PORT = "confignode.jmx.port";
 
-  public static final String DATA_DIR = "data";
+  public static final String DATA_DIR = "data" + File.separator + "confignode";
   public static final String CONF_DIR = "conf";
   public static final String CONSENSUS_FOLDER = "consensus";
   public static final String UDF_FOLDER = "udf";
 
   public static final int MIN_SUPPORTED_JDK_VERSION = 8;
+
+  public static final String REMOVE_CONFIGNODE_USAGE =
+      "Executed failed, check usage: <Node-id>/<internal_address>:<internal_port>";
+
+  public static final String REMOVE_DATANODE_PROCESS = "[REMOVE_DATANODE_PROCESS]";
+  public static final String REGION_MIGRATE_PROCESS = "[REGION_MIGRATE_PROCESS]";
+
+  public static final String IOTDB_FOREGROUND = "iotdb-foreground";
+  public static final String IOTDB_PIDFILE = "iotdb-pidfile";
 
   private ConfigNodeConstant() {
     // empty constructor

@@ -30,7 +30,7 @@ public abstract class TernaryColumnTransformer extends ColumnTransformer {
 
   protected ColumnTransformer thirdColumnTransformer;
 
-  public TernaryColumnTransformer(
+  protected TernaryColumnTransformer(
       Type returnType,
       ColumnTransformer firstColumnTransformer,
       ColumnTransformer secondColumnTransformer,
@@ -40,5 +40,17 @@ public abstract class TernaryColumnTransformer extends ColumnTransformer {
     this.secondColumnTransformer = secondColumnTransformer;
     this.thirdColumnTransformer = thirdColumnTransformer;
     checkType();
+  }
+
+  public ColumnTransformer getFirstColumnTransformer() {
+    return firstColumnTransformer;
+  }
+
+  public ColumnTransformer getSecondColumnTransformer() {
+    return secondColumnTransformer;
+  }
+
+  public ColumnTransformer getThirdColumnTransformer() {
+    return thirdColumnTransformer;
   }
 }

@@ -19,25 +19,32 @@
 package org.apache.iotdb.db.mpp.execution;
 
 import org.apache.iotdb.common.rpc.thrift.TSStatus;
-import org.apache.iotdb.db.mpp.common.FragmentInstanceId;
+import org.apache.iotdb.commons.exception.IoTDBException;
 import org.apache.iotdb.db.mpp.common.QueryId;
-import org.apache.iotdb.db.mpp.execution.fragment.FragmentInstanceState;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
+import static org.apache.iotdb.db.mpp.execution.QueryState.ABORTED;
+import static org.apache.iotdb.db.mpp.execution.QueryState.CANCELED;
+import static org.apache.iotdb.db.mpp.execution.QueryState.DISPATCHING;
+import static org.apache.iotdb.db.mpp.execution.QueryState.FAILED;
+import static org.apache.iotdb.db.mpp.execution.QueryState.FINISHED;
+import static org.apache.iotdb.db.mpp.execution.QueryState.PENDING_RETRY;
+import static org.apache.iotdb.db.mpp.execution.QueryState.PLANNED;
+import static org.apache.iotdb.db.mpp.execution.QueryState.QUEUED;
+import static org.apache.iotdb.db.mpp.execution.QueryState.RUNNING;
 
 /**
  * State machine for a QueryExecution. It stores the states for the QueryExecution. Others can
  * register listeners when the state changes of the QueryExecution.
  */
 public class QueryStateMachine {
-  private final String name;
   private final StateMachine<QueryState> queryState;
-  private final Map<FragmentInstanceId, FragmentInstanceState> fragInstanceStateMap;
 
   // The executor will be used in all the state machines belonged to this query.
   private Executor stateMachineExecutor;
@@ -45,34 +52,13 @@ public class QueryStateMachine {
   private TSStatus failureStatus;
 
   public QueryStateMachine(QueryId queryId, ExecutorService executor) {
-    this.name = String.format("QueryStateMachine[%s]", queryId);
     this.stateMachineExecutor = executor;
-    this.fragInstanceStateMap = new ConcurrentHashMap<>();
     this.queryState =
         new StateMachine<>(
             queryId.toString(),
             this.stateMachineExecutor,
-            QueryState.QUEUED,
+            QUEUED,
             QueryState.TERMINAL_INSTANCE_STATES);
-  }
-
-  public void initialFragInstanceState(FragmentInstanceId id, FragmentInstanceState state) {
-    this.fragInstanceStateMap.put(id, state);
-  }
-
-  public void updateFragInstanceState(FragmentInstanceId id, FragmentInstanceState state) {
-    this.fragInstanceStateMap.put(id, state);
-    // TODO: (xingtanzjr) we need to distinguish the Timeout situation
-    if (state.isFailed()) {
-      transitionToFailed(
-          new RuntimeException(String.format("FragmentInstance[%s] is failed.", id)));
-    }
-    boolean allFinished =
-        fragInstanceStateMap.values().stream()
-            .allMatch(currentState -> currentState == FragmentInstanceState.FINISHED);
-    if (allFinished) {
-      transitionToFinished();
-    }
   }
 
   public void addStateChangeListener(
@@ -84,76 +70,71 @@ public class QueryStateMachine {
     return queryState.getStateChange(currentState);
   }
 
-  private String getName() {
-    return name;
-  }
-
   public QueryState getState() {
     return queryState.get();
   }
 
+  public void transitionToQueued() {
+    queryState.set(QUEUED);
+  }
+
   public void transitionToPlanned() {
-    queryState.set(QueryState.PLANNED);
+    queryState.setIf(PLANNED, currentState -> currentState == QUEUED);
   }
 
   public void transitionToDispatching() {
-    queryState.set(QueryState.DISPATCHING);
+    queryState.setIf(DISPATCHING, currentState -> currentState == PLANNED);
   }
 
-  public void transitionToRetrying(TSStatus failureStatus) {
-    if (queryState.get().isDone()) {
-      return;
-    }
+  public void transitionToPendingRetry(TSStatus failureStatus) {
     this.failureStatus = failureStatus;
-    queryState.set(QueryState.RETRYING);
+    queryState.setIf(PENDING_RETRY, currentState -> currentState == DISPATCHING);
   }
 
   public void transitionToRunning() {
-    queryState.set(QueryState.RUNNING);
+    // if we can skipExecute in QueryExecution.start(), we will directly change from QUEUED to
+    // RUNNING
+    queryState.setIf(
+        RUNNING, currentState -> currentState == DISPATCHING || currentState == QUEUED);
   }
 
   public void transitionToFinished() {
-    if (queryState.get().isDone()) {
-      return;
-    }
-    queryState.set(QueryState.FINISHED);
+    transitionToDoneState(FINISHED);
   }
 
   public void transitionToCanceled() {
-    if (queryState.get().isDone()) {
-      return;
-    }
-    queryState.set(QueryState.CANCELED);
+    transitionToDoneState(CANCELED);
+  }
+
+  public void transitionToCanceled(Throwable throwable, TSStatus failureStatus) {
+    this.failureException = throwable;
+    this.failureStatus = failureStatus;
+    transitionToDoneState(CANCELED);
   }
 
   public void transitionToAborted() {
-    if (queryState.get().isDone()) {
-      return;
-    }
-    queryState.set(QueryState.ABORTED);
+    transitionToDoneState(ABORTED);
   }
 
   public void transitionToFailed() {
-    if (queryState.get().isDone()) {
-      return;
-    }
-    queryState.set(QueryState.FAILED);
+    transitionToDoneState(FAILED);
   }
 
   public void transitionToFailed(Throwable throwable) {
-    if (queryState.get().isDone()) {
-      return;
-    }
     this.failureException = throwable;
-    queryState.set(QueryState.FAILED);
+    transitionToDoneState(FAILED);
   }
 
   public void transitionToFailed(TSStatus failureStatus) {
-    if (queryState.get().isDone()) {
-      return;
-    }
     this.failureStatus = failureStatus;
-    queryState.set(QueryState.FAILED);
+    transitionToDoneState(FAILED);
+  }
+
+  private void transitionToDoneState(QueryState doneState) {
+    requireNonNull(doneState, "doneState is null");
+    checkArgument(doneState.isDone(), "doneState %s is not a done state", doneState);
+
+    queryState.setIf(doneState, currentState -> !currentState.isDone());
   }
 
   public String getFailureMessage() {
@@ -161,6 +142,14 @@ public class QueryStateMachine {
       return failureException.getMessage();
     }
     return "no detailed failure reason in QueryStateMachine";
+  }
+
+  public Throwable getFailureException() {
+    if (failureException == null) {
+      return new IoTDBException(getFailureStatus().getMessage(), getFailureStatus().code);
+    } else {
+      return failureException;
+    }
   }
 
   public TSStatus getFailureStatus() {

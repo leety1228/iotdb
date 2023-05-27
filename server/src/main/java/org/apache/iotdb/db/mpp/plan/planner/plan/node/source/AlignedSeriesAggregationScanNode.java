@@ -20,9 +20,9 @@
 package org.apache.iotdb.db.mpp.plan.planner.plan.node.source;
 
 import org.apache.iotdb.common.rpc.thrift.TRegionReplicaSet;
+import org.apache.iotdb.commons.path.AlignedPath;
 import org.apache.iotdb.commons.path.PartialPath;
-import org.apache.iotdb.db.metadata.path.AlignedPath;
-import org.apache.iotdb.db.metadata.path.PathDeserializeUtil;
+import org.apache.iotdb.commons.path.PathDeserializeUtil;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeId;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeType;
@@ -83,10 +83,12 @@ public class AlignedSeriesAggregationScanNode extends SeriesAggregationSourceNod
       List<AggregationDescriptor> aggregationDescriptorList,
       Ordering scanOrder,
       @Nullable Filter timeFilter,
+      @Nullable Filter valueFilter,
       @Nullable GroupByTimeParameter groupByTimeParameter,
       TRegionReplicaSet dataRegionReplicaSet) {
     this(id, alignedPath, aggregationDescriptorList, scanOrder, groupByTimeParameter);
     this.timeFilter = timeFilter;
+    this.valueFilter = valueFilter;
     this.regionReplicaSet = dataRegionReplicaSet;
   }
 
@@ -94,22 +96,9 @@ public class AlignedSeriesAggregationScanNode extends SeriesAggregationSourceNod
     return alignedPath;
   }
 
+  @Override
   public Ordering getScanOrder() {
     return scanOrder;
-  }
-
-  @Nullable
-  public Filter getTimeFilter() {
-    return timeFilter;
-  }
-
-  public void setTimeFilter(@Nullable Filter timeFilter) {
-    this.timeFilter = timeFilter;
-  }
-
-  @Nullable
-  public GroupByTimeParameter getGroupByTimeParameter() {
-    return groupByTimeParameter;
   }
 
   @Override
@@ -152,6 +141,7 @@ public class AlignedSeriesAggregationScanNode extends SeriesAggregationSourceNod
         getAggregationDescriptorList(),
         getScanOrder(),
         getTimeFilter(),
+        getValueFilter(),
         getGroupByTimeParameter(),
         getRegionReplicaSet());
   }
@@ -184,6 +174,12 @@ public class AlignedSeriesAggregationScanNode extends SeriesAggregationSourceNod
       ReadWriteIOUtils.write((byte) 1, byteBuffer);
       timeFilter.serialize(byteBuffer);
     }
+    if (valueFilter == null) {
+      ReadWriteIOUtils.write((byte) 0, byteBuffer);
+    } else {
+      ReadWriteIOUtils.write((byte) 1, byteBuffer);
+      valueFilter.serialize(byteBuffer);
+    }
     if (groupByTimeParameter == null) {
       ReadWriteIOUtils.write((byte) 0, byteBuffer);
     } else {
@@ -207,6 +203,12 @@ public class AlignedSeriesAggregationScanNode extends SeriesAggregationSourceNod
       ReadWriteIOUtils.write((byte) 1, stream);
       timeFilter.serialize(stream);
     }
+    if (valueFilter == null) {
+      ReadWriteIOUtils.write((byte) 0, stream);
+    } else {
+      ReadWriteIOUtils.write((byte) 1, stream);
+      valueFilter.serialize(stream);
+    }
     if (groupByTimeParameter == null) {
       ReadWriteIOUtils.write((byte) 0, stream);
     } else {
@@ -229,6 +231,11 @@ public class AlignedSeriesAggregationScanNode extends SeriesAggregationSourceNod
       timeFilter = FilterFactory.deserialize(byteBuffer);
     }
     isNull = ReadWriteIOUtils.readByte(byteBuffer);
+    Filter valueFilter = null;
+    if (isNull == 1) {
+      valueFilter = FilterFactory.deserialize(byteBuffer);
+    }
+    isNull = ReadWriteIOUtils.readByte(byteBuffer);
     GroupByTimeParameter groupByTimeParameter = null;
     if (isNull == 1) {
       groupByTimeParameter = GroupByTimeParameter.deserialize(byteBuffer);
@@ -240,6 +247,7 @@ public class AlignedSeriesAggregationScanNode extends SeriesAggregationSourceNod
         aggregationDescriptorList,
         scanOrder,
         timeFilter,
+        valueFilter,
         groupByTimeParameter,
         null);
   }
@@ -257,23 +265,12 @@ public class AlignedSeriesAggregationScanNode extends SeriesAggregationSourceNod
     }
     AlignedSeriesAggregationScanNode that = (AlignedSeriesAggregationScanNode) o;
     return alignedPath.equals(that.alignedPath)
-        && aggregationDescriptorList.equals(that.aggregationDescriptorList)
-        && scanOrder == that.scanOrder
-        && Objects.equals(timeFilter, that.timeFilter)
-        && Objects.equals(groupByTimeParameter, that.groupByTimeParameter)
         && Objects.equals(regionReplicaSet, that.regionReplicaSet);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(
-        super.hashCode(),
-        alignedPath,
-        aggregationDescriptorList,
-        scanOrder,
-        timeFilter,
-        groupByTimeParameter,
-        regionReplicaSet);
+    return Objects.hash(super.hashCode(), alignedPath, regionReplicaSet);
   }
 
   @Override

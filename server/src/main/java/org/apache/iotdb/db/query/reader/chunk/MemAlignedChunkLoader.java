@@ -19,6 +19,7 @@
 package org.apache.iotdb.db.query.reader.chunk;
 
 import org.apache.iotdb.db.engine.querycontext.AlignedReadOnlyMemChunk;
+import org.apache.iotdb.db.mpp.metric.SeriesScanCostMetricSet;
 import org.apache.iotdb.tsfile.file.metadata.ChunkMetadata;
 import org.apache.iotdb.tsfile.file.metadata.IChunkMetadata;
 import org.apache.iotdb.tsfile.read.common.Chunk;
@@ -26,10 +27,16 @@ import org.apache.iotdb.tsfile.read.controller.IChunkLoader;
 import org.apache.iotdb.tsfile.read.filter.basic.Filter;
 import org.apache.iotdb.tsfile.read.reader.IChunkReader;
 
+import static org.apache.iotdb.db.mpp.metric.SeriesScanCostMetricSet.CONSTRUCT_CHUNK_READER_ALIGNED_MEM;
+import static org.apache.iotdb.db.mpp.metric.SeriesScanCostMetricSet.INIT_CHUNK_READER_ALIGNED_MEM;
+
 /** To read one aligned chunk from memory, and only used in iotdb server module */
 public class MemAlignedChunkLoader implements IChunkLoader {
 
   private final AlignedReadOnlyMemChunk chunk;
+
+  private static final SeriesScanCostMetricSet SERIES_SCAN_COST_METRIC_SET =
+      SeriesScanCostMetricSet.getInstance();
 
   public MemAlignedChunkLoader(AlignedReadOnlyMemChunk chunk) {
     this.chunk = chunk;
@@ -47,6 +54,14 @@ public class MemAlignedChunkLoader implements IChunkLoader {
 
   @Override
   public IChunkReader getChunkReader(IChunkMetadata chunkMetaData, Filter timeFilter) {
-    return new MemAlignedChunkReader(chunk, timeFilter);
+    long startTime = System.nanoTime();
+    try {
+      return new MemAlignedChunkReader(chunk, timeFilter);
+    } finally {
+      long duration = System.nanoTime() - startTime;
+      SERIES_SCAN_COST_METRIC_SET.recordSeriesScanCost(
+          CONSTRUCT_CHUNK_READER_ALIGNED_MEM, duration);
+      SERIES_SCAN_COST_METRIC_SET.recordSeriesScanCost(INIT_CHUNK_READER_ALIGNED_MEM, duration);
+    }
   }
 }

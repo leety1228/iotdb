@@ -20,7 +20,6 @@
 package org.apache.iotdb.db.mpp.plan.statement;
 
 import org.apache.iotdb.commons.path.PartialPath;
-import org.apache.iotdb.db.mpp.plan.constant.StatementType;
 import org.apache.iotdb.db.mpp.plan.parser.ASTVisitor;
 
 import java.util.List;
@@ -56,7 +55,7 @@ public abstract class Statement extends StatementNode {
   }
 
   public boolean isQuery() {
-    return statementType == StatementType.QUERY;
+    return false;
   }
 
   public boolean isAuthenticationRequired() {

@@ -21,9 +21,9 @@ package org.apache.iotdb.db.mpp.aggregation;
 
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.file.metadata.statistics.Statistics;
-import org.apache.iotdb.tsfile.read.common.TimeRange;
 import org.apache.iotdb.tsfile.read.common.block.column.Column;
 import org.apache.iotdb.tsfile.read.common.block.column.ColumnBuilder;
+import org.apache.iotdb.tsfile.utils.BitMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
@@ -37,20 +37,15 @@ public class MaxTimeAccumulator implements Accumulator {
   // Column should be like: | Time | Value |
   // Value is used to judge isNull()
   @Override
-  public int addInput(Column[] column, TimeRange timeRange) {
-    int curPositionCount = column[0].getPositionCount();
-    long curMinTime = timeRange.getMin();
-    long curMaxTime = timeRange.getMax();
-    for (int i = 0; i < curPositionCount; i++) {
-      long curTime = column[0].getLong(i);
-      if (curTime > curMaxTime || curTime < curMinTime) {
-        return i;
+  public void addInput(Column[] column, BitMap bitMap, int lastIndex) {
+    for (int i = 0; i <= lastIndex; i++) {
+      if (bitMap != null && !bitMap.isMarked(i)) {
+        continue;
       }
       if (!column[1].isNull(i)) {
-        updateMaxTime(curTime);
+        updateMaxTime(column[0].getLong(i));
       }
     }
-    return column[0].getPositionCount();
   }
 
   // partialResult should be like: | partialMaxTimeValue |

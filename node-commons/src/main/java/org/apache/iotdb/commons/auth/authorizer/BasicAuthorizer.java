@@ -26,9 +26,11 @@ import org.apache.iotdb.commons.auth.role.IRoleManager;
 import org.apache.iotdb.commons.auth.user.IUserManager;
 import org.apache.iotdb.commons.conf.CommonDescriptor;
 import org.apache.iotdb.commons.exception.StartupException;
+import org.apache.iotdb.commons.path.PartialPath;
 import org.apache.iotdb.commons.service.IService;
 import org.apache.iotdb.commons.service.ServiceType;
 import org.apache.iotdb.commons.utils.AuthUtils;
+import org.apache.iotdb.rpc.TSStatusCode;
 
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
@@ -72,16 +74,20 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
     logger.info("Initialization of Authorizer completes");
   }
 
-  /** function for getting the instance of the local file authorizer. */
+  /**
+   * Function for getting the instance of the local file authorizer.
+   *
+   * @exception AuthException Failed to initialize authorizer
+   */
   public static IAuthorizer getInstance() throws AuthException {
     if (InstanceHolder.instance == null) {
-      throw new AuthException("Authorizer uninitialized");
+      throw new AuthException(TSStatusCode.INIT_AUTH_ERROR, "Authorizer uninitialized");
     }
     return InstanceHolder.instance;
   }
 
   private static class InstanceHolder {
-    private static IAuthorizer instance;
+    private static final IAuthorizer instance;
 
     static {
       Class<BasicAuthorizer> c;
@@ -94,7 +100,6 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
             CommonDescriptor.getInstance().getConfig().getAuthorizerProvider());
         instance = c.getDeclaredConstructor().newInstance();
       } catch (Exception e) {
-        instance = null;
         // startup failed.
         throw new IllegalStateException("Authorizer could not be initialized!", e);
       }
@@ -115,49 +120,57 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   @Override
   public void createUser(String username, String password) throws AuthException {
     if (!userManager.createUser(username, password)) {
-      throw new AuthException(String.format("User %s already exists", username));
+      throw new AuthException(
+          TSStatusCode.USER_ALREADY_EXIST, String.format("User %s already exists", username));
     }
   }
 
   @Override
   public void deleteUser(String username) throws AuthException {
     if (isAdmin(username)) {
-      throw new AuthException("Default administrator cannot be deleted");
+      throw new AuthException(
+          TSStatusCode.NO_PERMISSION, "Default administrator cannot be deleted");
     }
     if (!userManager.deleteUser(username)) {
-      throw new AuthException(String.format("User %s does not exist", username));
+      throw new AuthException(
+          TSStatusCode.USER_NOT_EXIST, String.format("User %s does not exist", username));
     }
   }
 
   @Override
-  public void grantPrivilegeToUser(String username, String path, int privilegeId)
+  public void grantPrivilegeToUser(String username, PartialPath path, int privilegeId)
       throws AuthException {
-    String newPath = path;
+    PartialPath newPath = path;
     if (isAdmin(username)) {
-      throw new AuthException("Invalid operation, administrator already has all privileges");
+      throw new AuthException(
+          TSStatusCode.NO_PERMISSION,
+          "Invalid operation, administrator already has all privileges");
     }
     if (!PrivilegeType.isPathRelevant(privilegeId)) {
-      newPath = AuthUtils.ROOT_PATH_PRIVILEGE;
+      newPath = AuthUtils.ROOT_PATH_PRIVILEGE_PATH;
     }
     if (!userManager.grantPrivilegeToUser(username, newPath, privilegeId)) {
       throw new AuthException(
+          TSStatusCode.ALREADY_HAS_PRIVILEGE,
           String.format(
               "User %s already has %s on %s", username, PrivilegeType.values()[privilegeId], path));
     }
   }
 
   @Override
-  public void revokePrivilegeFromUser(String username, String path, int privilegeId)
+  public void revokePrivilegeFromUser(String username, PartialPath path, int privilegeId)
       throws AuthException {
     if (isAdmin(username)) {
-      throw new AuthException("Invalid operation, administrator must have all privileges");
-    }
-    String p = path;
-    if (!PrivilegeType.isPathRelevant(privilegeId)) {
-      p = AuthUtils.ROOT_PATH_PRIVILEGE;
-    }
-    if (!userManager.revokePrivilegeFromUser(username, p, privilegeId)) {
       throw new AuthException(
+          TSStatusCode.NO_PERMISSION, "Invalid operation, administrator must have all privileges");
+    }
+    PartialPath newPath = path;
+    if (!PrivilegeType.isPathRelevant(privilegeId)) {
+      newPath = AuthUtils.ROOT_PATH_PRIVILEGE_PATH;
+    }
+    if (!userManager.revokePrivilegeFromUser(username, newPath, privilegeId)) {
+      throw new AuthException(
+          TSStatusCode.NOT_HAS_PRIVILEGE,
           String.format(
               "User %s does not have %s on %s",
               username, PrivilegeType.values()[privilegeId], path));
@@ -168,7 +181,8 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   public void createRole(String roleName) throws AuthException {
     if (!roleManager.createRole(roleName)) {
       logger.error("Role {} already exists", roleName);
-      throw new AuthException(String.format("Role %s already exists", roleName));
+      throw new AuthException(
+          TSStatusCode.ROLE_ALREADY_EXIST, String.format("Role %s already exists", roleName));
     }
   }
 
@@ -176,7 +190,8 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   public void deleteRole(String roleName) throws AuthException {
     boolean success = roleManager.deleteRole(roleName);
     if (!success) {
-      throw new AuthException(String.format("Role %s does not exist", roleName));
+      throw new AuthException(
+          TSStatusCode.ROLE_NOT_EXIST, String.format("Role %s does not exist", roleName));
     } else {
       // proceed to revoke the role in all users
       List<String> users = userManager.listAllUsers();
@@ -195,28 +210,30 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   }
 
   @Override
-  public void grantPrivilegeToRole(String roleName, String path, int privilegeId)
+  public void grantPrivilegeToRole(String roleName, PartialPath path, int privilegeId)
       throws AuthException {
-    String p = path;
+    PartialPath newPath = path;
     if (!PrivilegeType.isPathRelevant(privilegeId)) {
-      p = AuthUtils.ROOT_PATH_PRIVILEGE;
+      newPath = AuthUtils.ROOT_PATH_PRIVILEGE_PATH;
     }
-    if (!roleManager.grantPrivilegeToRole(roleName, p, privilegeId)) {
+    if (!roleManager.grantPrivilegeToRole(roleName, newPath, privilegeId)) {
       throw new AuthException(
+          TSStatusCode.ALREADY_HAS_PRIVILEGE,
           String.format(
               "Role %s already has %s on %s", roleName, PrivilegeType.values()[privilegeId], path));
     }
   }
 
   @Override
-  public void revokePrivilegeFromRole(String roleName, String path, int privilegeId)
+  public void revokePrivilegeFromRole(String roleName, PartialPath path, int privilegeId)
       throws AuthException {
-    String p = path;
+    PartialPath newPath = path;
     if (!PrivilegeType.isPathRelevant(privilegeId)) {
-      p = AuthUtils.ROOT_PATH_PRIVILEGE;
+      newPath = AuthUtils.ROOT_PATH_PRIVILEGE_PATH;
     }
-    if (!roleManager.revokePrivilegeFromRole(roleName, p, privilegeId)) {
+    if (!roleManager.revokePrivilegeFromRole(roleName, newPath, privilegeId)) {
       throw new AuthException(
+          TSStatusCode.NOT_HAS_PRIVILEGE,
           String.format(
               "Role %s does not have %s on %s",
               roleName, PrivilegeType.values()[privilegeId], path));
@@ -227,17 +244,21 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   public void grantRoleToUser(String roleName, String username) throws AuthException {
     Role role = roleManager.getRole(roleName);
     if (role == null) {
-      throw new AuthException(String.format(NO_SUCH_ROLE_EXCEPTION, roleName));
+      throw new AuthException(
+          TSStatusCode.ROLE_NOT_EXIST, String.format(NO_SUCH_ROLE_EXCEPTION, roleName));
     }
     // the role may be deleted before it ts granted to the user, so a double check is necessary.
     boolean success = userManager.grantRoleToUser(roleName, username);
     if (success) {
       role = roleManager.getRole(roleName);
       if (role == null) {
-        throw new AuthException(String.format(NO_SUCH_ROLE_EXCEPTION, roleName));
+        throw new AuthException(
+            TSStatusCode.ROLE_NOT_EXIST, String.format(NO_SUCH_ROLE_EXCEPTION, roleName));
       }
     } else {
-      throw new AuthException(String.format("User %s already has role %s", username, roleName));
+      throw new AuthException(
+          TSStatusCode.USER_ALREADY_HAS_ROLE,
+          String.format("User %s already has role %s", username, roleName));
     }
   }
 
@@ -245,21 +266,25 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   public void revokeRoleFromUser(String roleName, String username) throws AuthException {
     Role role = roleManager.getRole(roleName);
     if (role == null) {
-      throw new AuthException(String.format(NO_SUCH_ROLE_EXCEPTION, roleName));
+      throw new AuthException(
+          TSStatusCode.ROLE_NOT_EXIST, String.format(NO_SUCH_ROLE_EXCEPTION, roleName));
     }
     if (!userManager.revokeRoleFromUser(roleName, username)) {
-      throw new AuthException(String.format("User %s does not have role %s", username, roleName));
+      throw new AuthException(
+          TSStatusCode.USER_NOT_HAS_ROLE,
+          String.format("User %s does not have role %s", username, roleName));
     }
   }
 
   @Override
-  public Set<Integer> getPrivileges(String username, String path) throws AuthException {
+  public Set<Integer> getPrivileges(String username, PartialPath path) throws AuthException {
     if (isAdmin(username)) {
       return ADMIN_PRIVILEGES;
     }
     User user = userManager.getUser(username);
     if (user == null) {
-      throw new AuthException(String.format(NO_SUCH_USER_EXCEPTION, username));
+      throw new AuthException(
+          TSStatusCode.USER_NOT_EXIST, String.format(NO_SUCH_USER_EXCEPTION, username));
     }
     // get privileges of the user
     Set<Integer> privileges = user.getPrivileges(path);
@@ -276,19 +301,21 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   @Override
   public void updateUserPassword(String username, String newPassword) throws AuthException {
     if (!userManager.updateUserPassword(username, newPassword)) {
-      throw new AuthException("password " + newPassword + " is illegal");
+      throw new AuthException(
+          TSStatusCode.ILLEGAL_PARAMETER, "password " + newPassword + " is illegal");
     }
   }
 
   @Override
-  public boolean checkUserPrivileges(String username, String path, int privilegeId)
+  public boolean checkUserPrivileges(String username, PartialPath path, int privilegeId)
       throws AuthException {
     if (isAdmin(username)) {
       return true;
     }
     User user = userManager.getUser(username);
     if (user == null) {
-      throw new AuthException(String.format(NO_SUCH_USER_EXCEPTION, username));
+      throw new AuthException(
+          TSStatusCode.USER_NOT_EXIST, String.format(NO_SUCH_USER_EXCEPTION, username));
     }
     // get privileges of the user
     if (user.checkPrivilege(path, privilegeId)) {
@@ -361,7 +388,9 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   }
 
   @Override
-  public void stop() {}
+  public void stop() {
+    // Nothing to do
+  }
 
   @Override
   public ServiceType getID() {
@@ -411,7 +440,7 @@ public abstract class BasicAuthorizer implements IAuthorizer, IService {
   @Override
   public boolean processTakeSnapshot(File snapshotDir) throws TException, IOException {
     return userManager.processTakeSnapshot(snapshotDir)
-        & roleManager.processTakeSnapshot(snapshotDir);
+        && roleManager.processTakeSnapshot(snapshotDir);
   }
 
   @Override

@@ -39,14 +39,14 @@ public class MetadataConstant {
   public static final String ROOT = "root";
   public static final String METADATA_TXT_LOG = "mlog.txt";
   public static final String METADATA_LOG = "mlog.bin";
+  public static final String METADATA_LOG_DESCRIPTION = "mlog.description";
   public static final String TAG_LOG = "tlog.txt";
   public static final String TEMPLATE_FILE = "template_log.bin";
   public static final String STORAGE_GROUP_LOG = "storage_group_log.bin";
   public static final String SCHEMA_FILE_NAME = "schema_file.pst";
   public static final String SCHEMA_LOG_FILE_NAME = "schema_file_log.bin";
 
-  public static final String METADATA_LOG_SNAPSHOT = "mlog.bin.snapshot";
-  public static final String METADATA_LOG_SNAPSHOT_TMP = "mlog.bin.snapshot.tmp";
+  public static final String SCHEMA_FILE_SNAPSHOT = "schema_file.pst.snapshot";
   public static final String TAG_LOG_SNAPSHOT = "tlog.txt.snapshot";
   public static final String TAG_LOG_SNAPSHOT_TMP = "tlog.txt.snapshot.tmp";
   public static final String MTREE_SNAPSHOT = "mtree.snapshot";
@@ -64,11 +64,20 @@ public class MetadataConstant {
   public static final byte ENTITY_MNODE_TYPE = 3;
   public static final byte STORAGE_GROUP_ENTITY_MNODE_TYPE = 4;
 
+  public static final byte LOGICAL_VIEW_MNODE_TYPE = 5;
+
   public static final String INTERNAL_MNODE_TYPE_NAME = "InternalMNode";
   public static final String STORAGE_GROUP_MNODE_TYPE_NAME = "StorageGroupMNode";
   public static final String MEASUREMENT_MNODE_TYPE_NAME = "MeasurementMNode";
   public static final String ENTITY_MNODE_TYPE_NAME = "EntityMNode";
   public static final String STORAGE_GROUP_ENTITY_MNODE_TYPE_NAME = "StorageGroupEntityMNode";
+
+  public static final String LOGICAL_VIEW_MNODE_TYPE_NAME = "LogicalViewMNode";
+
+  public static final String SCHEMA_REGION_METRIC_NAME = "schema_region";
+  public static final String SCHEMA_ENGINE_METRIC_NAME = "schema_file";
+
+  public static final String DEFAULT_SCHEMA_ENGINE_MODE = "Memory";
 
   public static String getMNodeTypeName(byte type) {
     switch (type) {
@@ -82,8 +91,14 @@ public class MetadataConstant {
         return ENTITY_MNODE_TYPE_NAME;
       case STORAGE_GROUP_ENTITY_MNODE_TYPE:
         return STORAGE_GROUP_ENTITY_MNODE_TYPE_NAME;
+      case LOGICAL_VIEW_MNODE_TYPE:
+        return LOGICAL_VIEW_MNODE_TYPE_NAME;
       default:
         throw new RuntimeException("Undefined MNode type " + type);
     }
+  }
+
+  public static boolean isStorageGroupType(byte type) {
+    return type == STORAGE_GROUP_MNODE_TYPE || type == STORAGE_GROUP_ENTITY_MNODE_TYPE;
   }
 }

@@ -19,20 +19,15 @@
 
 package org.apache.iotdb.db.mpp.plan.expression.unary;
 
-import org.apache.iotdb.db.mpp.plan.analyze.TypeProvider;
 import org.apache.iotdb.db.mpp.plan.expression.Expression;
 import org.apache.iotdb.db.mpp.plan.expression.ExpressionType;
 import org.apache.iotdb.db.mpp.plan.expression.leaf.ConstantOperand;
 import org.apache.iotdb.db.mpp.plan.expression.leaf.TimeSeriesOperand;
 import org.apache.iotdb.db.mpp.plan.expression.multi.FunctionExpression;
-import org.apache.iotdb.db.mpp.transformation.api.LayerPointReader;
-import org.apache.iotdb.db.mpp.transformation.dag.column.ColumnTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.column.unary.InColumnTransformer;
-import org.apache.iotdb.db.mpp.transformation.dag.transformer.Transformer;
-import org.apache.iotdb.db.mpp.transformation.dag.transformer.unary.InTransformer;
-import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
-import org.apache.iotdb.tsfile.read.common.type.Type;
+import org.apache.iotdb.db.mpp.plan.expression.visitor.ExpressionVisitor;
 import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
+
+import org.jetbrains.annotations.NotNull;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -70,16 +65,6 @@ public class InExpression extends UnaryExpression {
   }
 
   @Override
-  public TSDataType inferTypes(TypeProvider typeProvider) {
-    final String expressionString = toString();
-    if (!typeProvider.containsTypeInfoOf(expressionString)) {
-      expression.inferTypes(typeProvider);
-      typeProvider.setType(expressionString, TSDataType.BOOLEAN);
-    }
-    return TSDataType.BOOLEAN;
-  }
-
-  @Override
   protected String getExpressionStringInternal() {
     StringBuilder stringBuilder = new StringBuilder();
     if (expression instanceof FunctionExpression
@@ -89,6 +74,11 @@ public class InExpression extends UnaryExpression {
     } else {
       stringBuilder.append('(').append(expression).append(')').append(" IN (");
     }
+    return appendValuesToBuild(stringBuilder).toString();
+  }
+
+  @NotNull
+  private StringBuilder appendValuesToBuild(StringBuilder stringBuilder) {
     Iterator<String> iterator = values.iterator();
     if (iterator.hasNext()) {
       stringBuilder.append(iterator.next());
@@ -97,23 +87,12 @@ public class InExpression extends UnaryExpression {
       stringBuilder.append(',').append(iterator.next());
     }
     stringBuilder.append(')');
-    return stringBuilder.toString();
+    return stringBuilder;
   }
 
   @Override
   public ExpressionType getExpressionType() {
     return ExpressionType.IN;
-  }
-
-  @Override
-  protected Transformer constructTransformer(LayerPointReader pointReader) {
-    return new InTransformer(pointReader, isNotIn, values);
-  }
-
-  @Override
-  protected ColumnTransformer getConcreteUnaryColumnTransformer(
-      ColumnTransformer childColumnTransformer, Type returnType) {
-    return new InColumnTransformer(returnType, childColumnTransformer, isNotIn, values);
   }
 
   @Override
@@ -139,5 +118,27 @@ public class InExpression extends UnaryExpression {
     for (String value : values) {
       ReadWriteIOUtils.write(value, stream);
     }
+  }
+
+  @Override
+  public String getStringWithViewOfThisExpressionInternal() {
+    StringBuilder stringBuilder = new StringBuilder();
+    if (expression instanceof FunctionExpression
+        || expression instanceof ConstantOperand
+        || expression instanceof TimeSeriesOperand) {
+      stringBuilder.append(expression.getStringWithViewOfThisExpression()).append(" IN (");
+    } else {
+      stringBuilder
+          .append('(')
+          .append(expression.getStringWithViewOfThisExpression())
+          .append(')')
+          .append(" IN (");
+    }
+    return appendValuesToBuild(stringBuilder).toString();
+  }
+
+  @Override
+  public <R, C> R accept(ExpressionVisitor<R, C> visitor, C context) {
+    return visitor.visitInExpression(this, context);
   }
 }

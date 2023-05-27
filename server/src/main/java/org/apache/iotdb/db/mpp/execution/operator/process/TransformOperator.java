@@ -20,12 +20,12 @@
 package org.apache.iotdb.db.mpp.execution.operator.process;
 
 import org.apache.iotdb.commons.udf.service.UDFClassLoaderManager;
-import org.apache.iotdb.commons.udf.service.UDFRegistrationService;
+import org.apache.iotdb.commons.udf.service.UDFManagementService;
 import org.apache.iotdb.db.conf.IoTDBDescriptor;
 import org.apache.iotdb.db.exception.query.QueryProcessException;
+import org.apache.iotdb.db.mpp.common.NodeRef;
 import org.apache.iotdb.db.mpp.execution.operator.Operator;
 import org.apache.iotdb.db.mpp.execution.operator.OperatorContext;
-import org.apache.iotdb.db.mpp.plan.analyze.TypeProvider;
 import org.apache.iotdb.db.mpp.plan.expression.Expression;
 import org.apache.iotdb.db.mpp.plan.planner.plan.parameter.InputLocation;
 import org.apache.iotdb.db.mpp.transformation.api.LayerPointReader;
@@ -35,6 +35,7 @@ import org.apache.iotdb.db.mpp.transformation.dag.input.QueryDataSetInputLayer;
 import org.apache.iotdb.db.mpp.transformation.dag.input.TsBlockInputDataSet;
 import org.apache.iotdb.db.mpp.transformation.dag.udf.UDTFContext;
 import org.apache.iotdb.db.utils.datastructure.TimeSelector;
+import org.apache.iotdb.tsfile.common.conf.TSFileDescriptor;
 import org.apache.iotdb.tsfile.exception.write.UnSupportedDataTypeException;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.read.common.block.TsBlock;
@@ -76,6 +77,8 @@ public class TransformOperator implements ProcessOperator {
   protected TimeSelector timeHeap;
   protected boolean[] shouldIterateReadersToNextValid;
 
+  private final String udtfQueryId;
+
   public TransformOperator(
       OperatorContext operatorContext,
       Operator inputOperator,
@@ -84,16 +87,19 @@ public class TransformOperator implements ProcessOperator {
       Expression[] outputExpressions,
       boolean keepNull,
       ZoneId zoneId,
-      TypeProvider typeProvider,
+      Map<NodeRef<Expression>, TSDataType> expressionTypes,
       boolean isAscending)
       throws QueryProcessException, IOException {
     this.operatorContext = operatorContext;
     this.inputOperator = inputOperator;
     this.keepNull = keepNull;
+    // use DriverTaskID().getFullId() to ensure that udtfQueryId for each TransformOperator is
+    // unique
+    this.udtfQueryId = operatorContext.getDriverContext().getDriverTaskID().getFullId();
 
     initInputLayer(inputDataTypes);
     initUdtfContext(outputExpressions, zoneId);
-    initTransformers(inputLocations, outputExpressions, typeProvider);
+    initTransformers(inputLocations, outputExpressions, expressionTypes);
     timeHeap = new TimeSelector(transformers.length << 1, isAscending);
     shouldIterateReadersToNextValid = new boolean[outputExpressions.length];
     Arrays.fill(shouldIterateReadersToNextValid, true);
@@ -102,7 +108,7 @@ public class TransformOperator implements ProcessOperator {
   private void initInputLayer(List<TSDataType> inputDataTypes) throws QueryProcessException {
     inputLayer =
         new QueryDataSetInputLayer(
-            operatorContext.getOperatorId(),
+            udtfQueryId,
             udfReaderMemoryBudgetInMB,
             new TsBlockInputDataSet(inputOperator, inputDataTypes));
   }
@@ -115,20 +121,19 @@ public class TransformOperator implements ProcessOperator {
   protected void initTransformers(
       Map<String, List<InputLocation>> inputLocations,
       Expression[] outputExpressions,
-      TypeProvider typeProvider)
-      throws QueryProcessException, IOException {
-    UDFRegistrationService.getInstance().acquireRegistrationLock();
+      Map<NodeRef<Expression>, TSDataType> expressionTypes) {
+    UDFManagementService.getInstance().acquireLock();
     try {
       // This statement must be surrounded by the registration lock.
-      UDFClassLoaderManager.getInstance().initializeUDFQuery(operatorContext.getOperatorId());
+      UDFClassLoaderManager.getInstance().initializeUDFQuery(udtfQueryId);
       // UDF executors will be initialized at the same time
       transformers =
           new EvaluationDAGBuilder(
-                  operatorContext.getOperatorId(),
+                  udtfQueryId,
                   inputLayer,
                   inputLocations,
                   outputExpressions,
-                  typeProvider,
+                  expressionTypes,
                   udtfContext,
                   udfTransformerMemoryBudgetInMB + udfCollectorMemoryBudgetInMB)
               .buildLayerMemoryAssigner()
@@ -136,12 +141,11 @@ public class TransformOperator implements ProcessOperator {
               .buildResultColumnPointReaders()
               .getOutputPointReaders();
     } finally {
-      UDFRegistrationService.getInstance().releaseRegistrationLock();
+      UDFManagementService.getInstance().releaseLock();
     }
   }
 
-  protected YieldableState iterateAllColumnsToNextValid()
-      throws QueryProcessException, IOException {
+  protected YieldableState iterateAllColumnsToNextValid() throws Exception {
     for (int i = 0, n = shouldIterateReadersToNextValid.length; i < n; ++i) {
       if (shouldIterateReadersToNextValid[i]) {
         final YieldableState yieldableState = iterateReaderToNextValid(transformers[i]);
@@ -154,8 +158,7 @@ public class TransformOperator implements ProcessOperator {
     return YieldableState.YIELDABLE;
   }
 
-  protected YieldableState iterateReaderToNextValid(LayerPointReader reader)
-      throws QueryProcessException, IOException {
+  protected YieldableState iterateReaderToNextValid(LayerPointReader reader) throws Exception {
     // Since a constant operand is not allowed to be a result column, the reader will not be
     // a ConstantLayerPointReader.
     // If keepNull is false, we must iterate the reader until a non-null row is returned.
@@ -172,7 +175,7 @@ public class TransformOperator implements ProcessOperator {
   }
 
   @Override
-  public final boolean hasNext() {
+  public final boolean hasNext() throws Exception {
     if (!timeHeap.isEmpty()) {
       return true;
     }
@@ -188,7 +191,7 @@ public class TransformOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
+  public TsBlock next() throws Exception {
 
     try {
       YieldableState yieldableState = iterateAllColumnsToNextValid();
@@ -255,7 +258,7 @@ public class TransformOperator implements ProcessOperator {
   }
 
   protected boolean collectReaderAppendIsNull(LayerPointReader reader, long currentTime)
-      throws QueryProcessException, IOException {
+      throws Exception {
     final YieldableState yieldableState = reader.yield();
 
     if (yieldableState == YieldableState.NOT_YIELDABLE_NO_MORE_DATA) {
@@ -270,16 +273,12 @@ public class TransformOperator implements ProcessOperator {
       return true;
     }
 
-    if (reader.isCurrentNull()) {
-      return true;
-    } else {
-      return false;
-    }
+    return reader.isCurrentNull();
   }
 
   protected YieldableState collectDataPoint(
       LayerPointReader reader, ColumnBuilder writer, long currentTime, int readerIndex)
-      throws QueryProcessException, IOException {
+      throws Exception {
     final YieldableState yieldableState = reader.yield();
     if (yieldableState == YieldableState.NOT_YIELDABLE_NO_MORE_DATA) {
       writer.appendNull();
@@ -330,7 +329,7 @@ public class TransformOperator implements ProcessOperator {
 
   @Override
   public void close() throws Exception {
-    udtfContext.finalizeUDFExecutors(operatorContext.getOperatorId());
+    udtfContext.finalizeUDFExecutors(udtfQueryId);
     inputOperator.close();
   }
 
@@ -340,14 +339,37 @@ public class TransformOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean isFinished() {
+  public boolean isFinished() throws Exception {
     // call hasNext first, or data of inputOperator could be missing
-    boolean flag = !hasNext();
+    boolean flag = !hasNextWithTimer();
     return timeHeap.isEmpty() && (flag || inputOperator.isFinished());
   }
 
   @Override
   public OperatorContext getOperatorContext() {
     return operatorContext;
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    // here we use maximum estimated memory usage
+    return (long)
+        (udfCollectorMemoryBudgetInMB
+            + udfTransformerMemoryBudgetInMB
+            + inputOperator.calculateMaxReturnSize());
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    // time + all value columns
+    return (long) (1 + transformers.length)
+        * TSFileDescriptor.getInstance().getConfig().getPageSizeInByte();
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    // Collector may cache points, here we use maximum usage
+    return (long)
+        (inputOperator.calculateRetainedSizeAfterCallingNext() + udfCollectorMemoryBudgetInMB);
   }
 }

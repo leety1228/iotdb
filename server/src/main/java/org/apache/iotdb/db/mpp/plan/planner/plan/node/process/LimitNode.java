@@ -24,8 +24,6 @@ import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeType;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanVisitor;
 import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
 
-import com.google.common.collect.ImmutableList;
-
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -33,52 +31,27 @@ import java.util.List;
 import java.util.Objects;
 
 /** LimitNode is used to select top n result. It uses the default order of upstream nodes */
-public class LimitNode extends ProcessNode {
+public class LimitNode extends SingleChildProcessNode {
 
-  private final int limit;
+  private final long limit;
 
-  private PlanNode child;
-
-  public LimitNode(PlanNodeId id, int limit) {
+  public LimitNode(PlanNodeId id, long limit) {
     super(id);
     this.limit = limit;
   }
 
-  public LimitNode(PlanNodeId id, PlanNode child, int limit) {
-    this(id, limit);
-    this.child = child;
+  public LimitNode(PlanNodeId id, PlanNode child, long limit) {
+    super(id, child);
+    this.limit = limit;
   }
 
-  public int getLimit() {
+  public long getLimit() {
     return limit;
-  }
-
-  public PlanNode getChild() {
-    return child;
-  }
-
-  public void setChild(PlanNode child) {
-    this.child = child;
-  }
-
-  @Override
-  public List<PlanNode> getChildren() {
-    return ImmutableList.of(child);
-  }
-
-  @Override
-  public void addChild(PlanNode child) {
-    this.child = child;
   }
 
   @Override
   public PlanNode clone() {
     return new LimitNode(getPlanNodeId(), this.limit);
-  }
-
-  @Override
-  public int allowedChildCount() {
-    return ONE_CHILD;
   }
 
   @Override
@@ -104,7 +77,7 @@ public class LimitNode extends ProcessNode {
   }
 
   public static LimitNode deserialize(ByteBuffer byteBuffer) {
-    int limit = ReadWriteIOUtils.readInt(byteBuffer);
+    long limit = ReadWriteIOUtils.readLong(byteBuffer);
     PlanNodeId planNodeId = PlanNodeId.deserialize(byteBuffer);
     return new LimitNode(planNodeId, limit);
   }
@@ -126,11 +99,11 @@ public class LimitNode extends ProcessNode {
       return false;
     }
     LimitNode that = (LimitNode) o;
-    return limit == that.limit && child.equals(that.child);
+    return limit == that.limit;
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(super.hashCode(), limit, child);
+    return Objects.hash(super.hashCode(), limit);
   }
 }

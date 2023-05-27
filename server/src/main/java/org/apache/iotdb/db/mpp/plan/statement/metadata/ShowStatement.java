@@ -20,16 +20,16 @@
 package org.apache.iotdb.db.mpp.plan.statement.metadata;
 
 import org.apache.iotdb.commons.path.PartialPath;
-import org.apache.iotdb.db.mpp.plan.constant.StatementType;
 import org.apache.iotdb.db.mpp.plan.statement.Statement;
+import org.apache.iotdb.db.mpp.plan.statement.StatementType;
 
 import java.util.Collections;
 import java.util.List;
 
 public class ShowStatement extends Statement {
 
-  int limit = 0;
-  int offset = 0;
+  long limit = 0;
+  long offset = 0;
 
   protected boolean isPrefixPath;
 
@@ -43,19 +43,19 @@ public class ShowStatement extends Statement {
     return Collections.emptyList();
   }
 
-  public int getLimit() {
+  public long getLimit() {
     return limit;
   }
 
-  public void setLimit(int limit) {
+  public void setLimit(long limit) {
     this.limit = limit;
   }
 
-  public int getOffset() {
+  public long getOffset() {
     return offset;
   }
 
-  public void setOffset(int offset) {
+  public void setOffset(long offset) {
     this.offset = offset;
   }
 

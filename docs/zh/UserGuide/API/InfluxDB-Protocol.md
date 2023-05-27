@@ -25,11 +25,11 @@
     <dependency>
         <groupId>org.apache.iotdb</groupId>
         <artifactId>influxdb-protocol</artifactId>
-        <version>0.14.0-SNAPSHOT</version>
+        <version>1.0.0</version>
     </dependency>
 ```
 
-这里是一些使用 InfluxDB-Protocol 适配器连接 IoTDB 的[示例](https://github.com/apache/iotdb/tree/master/example/inflxudb-protocol-example/src/main/java/org/apache/iotdb/influxdb/InfluxDBExample.java)
+这里是一些使用 InfluxDB-Protocol 适配器连接 IoTDB 的[示例](https://github.com/apache/iotdb/blob/master/example/influxdb-protocol-example/src/main/java/org/apache/iotdb/influxdb/InfluxDBExample.java)
 
 
 ## 1.切换方案
@@ -52,9 +52,9 @@ InfluxDB influxDB = IoTDBInfluxDBFactory.connect(openurl, username, password);
 
 该适配器以 IoTDB Java ServiceProvider 接口为底层基础，实现了 InfluxDB 的 Java 接口 `interface InfluxDB`，对用户提供了所有 InfluxDB 的接口方法，最终用户可以无感知地使用 InfluxDB 协议向 IoTDB 发起写入和读取请求。
 
-![architecture-design](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/API/IoTDB-InfluxDB/architecture-design.png?raw=true)
+![architecture-design](https://alioss.timecho.com/docs/img/UserGuide/API/IoTDB-InfluxDB/architecture-design.png?raw=true)
 
-![class-diagram](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/API/IoTDB-InfluxDB/class-diagram.png?raw=true)
+![class-diagram](https://alioss.timecho.com/docs/img/UserGuide/API/IoTDB-InfluxDB/class-diagram.png?raw=true)
 
 
 ### 2.2 元数据格式转换
@@ -68,34 +68,34 @@ InfluxDB 的元数据是 tag-field 模型，IoTDB 的元数据是树形模型。
 3. tags : 各种有索引的属性。
 4. fields : 各种记录值（没有索引的属性）。
 
-![influxdb-data](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/API/IoTDB-InfluxDB/influxdb-data.png?raw=true)
+![influxdb-data](https://alioss.timecho.com/docs/img/UserGuide/API/IoTDB-InfluxDB/influxdb-data.png?raw=true)
 
 #### 2.2.2 IoTDB 元数据
 
-1. storage group： 存储组。
+1. database： 数据库。
 2. path(time series ID)：存储路径。
 3. measurement： 物理量。
 
-![iotdb-data](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/API/IoTDB-InfluxDB/iotdb-data.png?raw=true)
+![iotdb-data](https://alioss.timecho.com/docs/img/UserGuide/API/IoTDB-InfluxDB/iotdb-data.png?raw=true)
 
 #### 2.2.3 两者映射关系
 
 InfluxDB 元数据和 IoTDB 元数据有着如下的映射关系：
-1. InfluxDB 中的 database 和 measurement 组合起来作为 IoTDB 中的 storage group。
+1. InfluxDB 中的 database 和 measurement 组合起来作为 IoTDB 中的 database。
 2. InfluxDB 中的 field key 作为 IoTDB 中 measurement 路径，InfluxDB 中的 field value 即是该路径下记录的测点值。
-3. InfluxDB 中的 tag 在 IoTDB 中使用 storage group 和 measurement 之间的路径表达。InfluxDB 的 tag key 由 storage group 和 measurement 之间路径的顺序隐式表达，tag value 记录为对应顺序的路径的名称。
+3. InfluxDB 中的 tag 在 IoTDB 中使用 database 和 measurement 之间的路径表达。InfluxDB 的 tag key 由 database 和 measurement 之间路径的顺序隐式表达，tag value 记录为对应顺序的路径的名称。
 
 InfluxDB 元数据向 IoTDB 元数据的转换关系可以由下面的公示表示：
 
 `root.{database}.{measurement}.{tag value 1}.{tag value 2}...{tag value N-1}.{tag value N}.{field key}`
 
-![influxdb-vs-iotdb-data](https://github.com/apache/iotdb-bin-resources/blob/main/docs/UserGuide/API/IoTDB-InfluxDB/influxdb-vs-iotdb-data.png?raw=true)
+![influxdb-vs-iotdb-data](https://alioss.timecho.com/docs/img/UserGuide/API/IoTDB-InfluxDB/influxdb-vs-iotdb-data.png?raw=true)
 
 如上图所示，可以看出：
 
-我们在 IoTDB 中使用 storage group 和 measurement 之间的路径来表达 InfluxDB tag 的概念，也就是图中右侧绿色方框的部分。
+我们在 IoTDB 中使用 database 和 measurement 之间的路径来表达 InfluxDB tag 的概念，也就是图中右侧绿色方框的部分。
 
-storage group 和 measurement 之间的每一层都代表一个 tag。如果 tag key 的数量为 N，那么 storage group 和 measurement 之间的路径的层数就是 N。我们对 storage group 和 measurement 之间的每一层进行顺序编号，每一个序号都和一个 tag key 一一对应。同时，我们使用 storage group 和 measurement 之间每一层 **路径的名字** 来记 tag value，tag key 可以通过自身的序号找到对应路径层级下的 tag value.
+database 和 measurement 之间的每一层都代表一个 tag。如果 tag key 的数量为 N，那么 database 和 measurement 之间的路径的层数就是 N。我们对 database 和 measurement 之间的每一层进行顺序编号，每一个序号都和一个 tag key 一一对应。同时，我们使用 database 和 measurement 之间每一层 **路径的名字** 来记 tag value，tag key 可以通过自身的序号找到对应路径层级下的 tag value.
 
 #### 2.2.4 关键问题
 
@@ -130,7 +130,7 @@ storage group 和 measurement 之间的每一层都代表一个 tag。如果 tag
 
 **tag key 对应顺序关系的持久化方案**
 
-存储组为`root.TAG_INFO`，分别用存储组下的 `database_name`, `measurement_name`, `tag_name` 和 `tag_order` 测点来存储 tag key及其对应的顺序关系。
+Database 为`root.TAG_INFO`，分别用 database 下的 `database_name`, `measurement_name`, `tag_name` 和 `tag_order` 测点来存储 tag key及其对应的顺序关系。
 
 ```
 +-----------------------------+---------------------------+------------------------------+----------------------+-----------------------+

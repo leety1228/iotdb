@@ -25,11 +25,11 @@ A wind power IoT scenario is taken as an example to illustrate how to creat a co
 
 According to the enterprise organization structure and equipment entity hierarchy, it is expressed as an attribute hierarchy structure, as shown below. The hierarchical from top to bottom is: power group layer - power plant layer - entity layer - measurement layer. ROOT is the root node, and each node of measurement layer is a leaf node. In the process of using IoTDB, the attributes on the path from ROOT node is directly connected to each leaf node with ".", thus forming the name of a timeseries in IoTDB. For example, The left-most path in Figure 2.1 can generate a timeseries named `root.ln.wf01.wt01.status`.
 
-<center><img style="width:100%; max-width:800px; max-height:600px; margin-left:auto; margin-right:auto; display:block;" src="https://user-images.githubusercontent.com/19167280/122668849-b1c69280-d1ec-11eb-83cb-3b73c40bdf72.png"></center>
+<center><img style="width:100%; max-width:800px; max-height:600px; margin-left:auto; margin-right:auto; display:block;" src="https://alioss.timecho.com/docs/img/github/122668849-b1c69280-d1ec-11eb-83cb-3b73c40bdf72.png"></center>
 
 Here are the basic concepts of the model involved in IoTDB. 
 
-## Measurement, Entity, Storage Group, Path
+## Measurement, Entity, Database, Path
 
 ### Measurement (Also called field)
 
@@ -39,19 +39,21 @@ It is information measured by detection equipment in an actual scene and can tra
 
 **An entity** is an equipped with measurements in real scenarios. In IoTDB, all measurements should have their corresponding entities.
 
-### Storage Group
+### Database
 
-**A group of entities.** Users can set any prefix path as a storage group. Provided that there are four timeseries `root.ln.wf01.wt01.status`, `root.ln.wf01.wt01.temperature`, `root.ln.wf02.wt02.hardware`, `root.ln.wf02.wt02.status`, two devices `wt01`, `wt02` under the path `root.ln` may belong to the same owner or the same manufacturer, so d1 and d2 are closely related. At this point, the prefix path root.vehicle can be designated as a storage group, which will enable IoTDB to store all devices under it in the same folder. Newly added devices under `root.ln` will also belong to this storage group.
+**A group of entities.** Users can create any prefix path as a database. Provided that there are four timeseries `root.ln.wf01.wt01.status`, `root.ln.wf01.wt01.temperature`, `root.ln.wf02.wt02.hardware`, `root.ln.wf02.wt02.status`, two devices `wt01`, `wt02` under the path `root.ln` may belong to the same owner or the same manufacturer, so d1 and d2 are closely related. At this point, the prefix path root.vehicle can be designated as a database, which will enable IoTDB to store all devices under it in the same folder. Newly added devices under `root.ln` will also belong to this database.
 
-> Note1: A full path (`root.ln.wf01.wt01.status` as in the above example) is not allowed to be set as a storage group.
+> Note1: A full path (`root.ln.wf01.wt01.status` as in the above example) is not allowed to be set as a database.
 >
-> Note2: The prefix of a timeseries must belong to a storage group. Before creating a timeseries, users must set which storage group the series belongs to. Only timeseries whose storage group is set can be persisted to disk.
+> Note2: The prefix of a timeseries must belong to a database. Before creating a timeseries, users must set which database the series belongs to. Only timeseries whose database is set can be persisted to disk.
+> 
+> Note3: The number of character in the path as database, including `root.`, shall not exceed 64.
 
-Once a prefix path is set as a storage group, the storage group settings cannot be changed.
+Once a prefix path is set as a database, the database settings cannot be changed.
 
-After a storage group is set, the ancestral layers, children and descendant layers of the corresponding prefix path are not allowed to be set up again (for example, after `root.ln` is set as the storage group, the root layer and `root.ln.wf01` are not allowed to be set as storage groups).
+After a database is set, the ancestral layers, children and descendant layers of the corresponding prefix path are not allowed to be set up again (for example, after `root.ln` is set as the database, the root layer and `root.ln.wf01` are not allowed to be created as database).
 
-The Layer Name of storage group can only consist of characters, numbers, underscores and hyphen, like `root.storagegroup_1-sg1`.
+The Layer Name of database can only consist of characters, numbers, and underscores, like `root.storagegroup_1`.
 
 ### Path
 
@@ -80,10 +82,10 @@ The following are the constraints on the `nodeName`:
 * `root` is a reserved character, and it is only allowed to appear at the beginning layer of the time series mentioned below. If `root` appears in other layers, it cannot be parsed and an error will be reported.
 * Except for the beginning layer (`root`) of the time series, the characters supported in other layers are as follows:
 
-  * [ 0-9 a-z A-Z _ : @ # $ { } ] （letters, numbers, a few special characters)
+  * [ 0-9 a-z A-Z _ ] （letters, numbers, underscore)
   * ['\u2E80'..'\u9FFF'] （Chinese characters）
-* In particular, if the system is deployed on a Windows machine, the storage group layer name will be case-insensitive. For example, creating both `root.ln` and `root.LN` at the same time is not allowed.
-* If you want to use special characters in `nodeName`, you can quote it with back quote, detailed information can be found here: [Syntax-Conventions](https://iotdb.apache.org/UserGuide/Master/Reference/Syntax-Conventions.html).
+* In particular, if the system is deployed on a Windows machine, the database layer name will be case-insensitive. For example, creating both `root.ln` and `root.LN` at the same time is not allowed.
+* If you want to use special characters in `nodeName`, you can quote it with back quote, detailed information can be found from charpter Syntax-Conventions,click here: [Syntax-Conventions](https://iotdb.apache.org/UserGuide/Master/Syntax-Conventions/Literal-Values.html).
 
 ### Path Pattern
 
@@ -130,7 +132,7 @@ When querying, you can query each timeseries separately.
 
 When inserting data, it is allowed to insert null value in the aligned timeseries.
 
-<img style="width:100%; max-width:800px; max-height:600px; margin-left:auto; margin-right:auto; display:block;" src="https://user-images.githubusercontent.com/19167280/114125919-f4850800-9929-11eb-8211-81d4c04af1ec.png">
+<img style="width:100%; max-width:800px; max-height:600px; margin-left:auto; margin-right:auto; display:block;" src="https://alioss.timecho.com/docs/img/github/114125919-f4850800-9929-11eb-8211-81d4c04af1ec.png">
 
 In the following chapters of data definition language, data operation language and Java Native Interface, various operations related to aligned timeseries will be introduced one by one.
 

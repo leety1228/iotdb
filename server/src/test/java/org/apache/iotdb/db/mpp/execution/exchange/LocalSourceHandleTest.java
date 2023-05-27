@@ -20,6 +20,7 @@
 package org.apache.iotdb.db.mpp.execution.exchange;
 
 import org.apache.iotdb.db.mpp.execution.exchange.MPPDataExchangeManager.SourceHandleListener;
+import org.apache.iotdb.db.mpp.execution.exchange.source.LocalSourceHandle;
 import org.apache.iotdb.db.mpp.execution.memory.LocalMemoryManager;
 import org.apache.iotdb.db.mpp.execution.memory.MemoryPool;
 import org.apache.iotdb.mpp.rpc.thrift.TFragmentInstanceId;
@@ -28,6 +29,8 @@ import com.google.common.util.concurrent.ListenableFuture;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
+
+import static org.testcontainers.shaded.com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 
 public class LocalSourceHandleTest {
   @Test
@@ -46,15 +49,15 @@ public class LocalSourceHandleTest {
     SourceHandleListener mockSourceHandleListener = Mockito.mock(SourceHandleListener.class);
     // Construct a shared TsBlock queue.
     SharedTsBlockQueue queue =
-        new SharedTsBlockQueue(localFragmentInstanceId, mockLocalMemoryManager);
+        new SharedTsBlockQueue(
+            localFragmentInstanceId,
+            localPlanNodeId,
+            mockLocalMemoryManager,
+            newDirectExecutorService());
 
     LocalSourceHandle localSourceHandle =
         new LocalSourceHandle(
-            remoteFragmentInstanceId,
-            localFragmentInstanceId,
-            localPlanNodeId,
-            queue,
-            mockSourceHandleListener);
+            localFragmentInstanceId, localPlanNodeId, queue, mockSourceHandleListener);
     Assert.assertFalse(localSourceHandle.isBlocked().isDone());
     Assert.assertFalse(localSourceHandle.isAborted());
     Assert.assertFalse(localSourceHandle.isFinished());
@@ -94,15 +97,15 @@ public class LocalSourceHandleTest {
     SourceHandleListener mockSourceHandleListener = Mockito.mock(SourceHandleListener.class);
     // Construct a shared tsblock queue.
     SharedTsBlockQueue queue =
-        new SharedTsBlockQueue(localFragmentInstanceId, mockLocalMemoryManager);
+        new SharedTsBlockQueue(
+            localFragmentInstanceId,
+            localPlanNodeId,
+            mockLocalMemoryManager,
+            newDirectExecutorService());
 
     LocalSourceHandle localSourceHandle =
         new LocalSourceHandle(
-            remoteFragmentInstanceId,
-            localFragmentInstanceId,
-            localPlanNodeId,
-            queue,
-            mockSourceHandleListener);
+            localFragmentInstanceId, localPlanNodeId, queue, mockSourceHandleListener);
     ListenableFuture<?> future = localSourceHandle.isBlocked();
     Assert.assertFalse(future.isDone());
     Assert.assertFalse(localSourceHandle.isAborted());

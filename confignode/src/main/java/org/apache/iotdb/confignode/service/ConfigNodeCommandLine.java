@@ -19,14 +19,11 @@
 package org.apache.iotdb.confignode.service;
 
 import org.apache.iotdb.common.rpc.thrift.TConfigNodeLocation;
-import org.apache.iotdb.common.rpc.thrift.TEndPoint;
 import org.apache.iotdb.commons.ServerCommandLine;
+import org.apache.iotdb.commons.conf.IoTDBConstant;
 import org.apache.iotdb.commons.exception.BadNodeUrlException;
 import org.apache.iotdb.commons.exception.ConfigurationException;
 import org.apache.iotdb.commons.exception.StartupException;
-import org.apache.iotdb.commons.service.StartupChecks;
-import org.apache.iotdb.commons.utils.NodeUrlUtils;
-import org.apache.iotdb.confignode.conf.ConfigNodeConstant;
 import org.apache.iotdb.confignode.conf.ConfigNodeRemoveCheck;
 import org.apache.iotdb.confignode.conf.ConfigNodeStartupCheck;
 
@@ -34,6 +31,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+
+import static org.apache.iotdb.confignode.conf.ConfigNodeConstant.REMOVE_CONFIGNODE_USAGE;
 
 public class ConfigNodeCommandLine extends ServerCommandLine {
   private static final Logger LOGGER = LoggerFactory.getLogger(ConfigNodeCommandLine.class);
@@ -69,49 +68,56 @@ public class ConfigNodeCommandLine extends ServerCommandLine {
     LOGGER.info("Running mode {}", mode);
     if (MODE_START.equals(mode)) {
       try {
-        // Startup environment check
-        StartupChecks checks = new StartupChecks().withDefaultTest();
-        checks.verify();
         // Do ConfigNode startup checks
-        ConfigNodeStartupCheck.getInstance().startUpCheck();
+        ConfigNodeStartupCheck checks = new ConfigNodeStartupCheck(IoTDBConstant.CN_ROLE);
+        checks.startUpCheck();
       } catch (StartupException | ConfigurationException | IOException e) {
         LOGGER.error("Meet error when doing start checking", e);
         return -1;
       }
       ConfigNode.getInstance().active();
     } else if (MODE_REMOVE.equals(mode)) {
-      // remove node
+      // remove ConfigNode
       try {
-        doRemoveNode(args);
+        doRemoveConfigNode(args);
       } catch (IOException e) {
-        LOGGER.error("Meet error when doing remove", e);
+        LOGGER.error("Meet error when doing remove ConfigNode", e);
         return -1;
       }
+    } else {
+      LOGGER.error("Unsupported startup mode: {}", mode);
+      return -1;
     }
 
     return 0;
   }
 
-  private void doRemoveNode(String[] args) throws IOException {
-    LOGGER.info("Starting to remove {}...", ConfigNodeConstant.GLOBAL_NAME);
-    if (args.length != 3) {
-      LOGGER.info("Usage: -r <ip>:<rpcPort>");
+  private void doRemoveConfigNode(String[] args) throws IOException {
+
+    if (args.length != 2) {
+      LOGGER.info(REMOVE_CONFIGNODE_USAGE);
       return;
     }
 
+    LOGGER.info("Starting to remove ConfigNode, parameter: {}, {}", args[0], args[1]);
+
     try {
-      TEndPoint endPoint = NodeUrlUtils.parseTEndPointUrl(args[2]);
       TConfigNodeLocation removeConfigNodeLocation =
-          ConfigNodeRemoveCheck.getInstance().removeCheck(endPoint);
+          ConfigNodeRemoveCheck.getInstance().removeCheck(args[1]);
       if (removeConfigNodeLocation == null) {
-        LOGGER.error("The ConfigNode not in the Cluster.");
+        LOGGER.error(
+            "The ConfigNode to be removed is not in the cluster, or the input format is incorrect.");
         return;
       }
 
       ConfigNodeRemoveCheck.getInstance().removeConfigNode(removeConfigNodeLocation);
     } catch (BadNodeUrlException e) {
       LOGGER.warn("No ConfigNodes need to be removed.", e);
+      return;
     }
-    LOGGER.info("{} is removed.", ConfigNodeConstant.GLOBAL_NAME);
+
+    LOGGER.info(
+        "ConfigNode: {} is removed. If the confignode data directory is no longer needed, you can delete it manually.",
+        args[1]);
   }
 }

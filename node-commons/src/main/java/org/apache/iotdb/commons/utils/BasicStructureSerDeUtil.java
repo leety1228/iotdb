@@ -29,6 +29,7 @@ import java.util.Map;
 
 public class BasicStructureSerDeUtil {
   public static final int INT_LEN = 4;
+  public static final int LONG_LEN = 8;
 
   private BasicStructureSerDeUtil() {}
 
@@ -45,9 +46,27 @@ public class BasicStructureSerDeUtil {
     return new String(bytes, 0, strLength);
   }
 
+  /** read string list from byteBuffer. */
+  public static List<String> readStringList(ByteBuffer buffer) {
+    int size = readInt(buffer);
+    if (size < 0) {
+      return null;
+    }
+    List<String> stringList = new ArrayList<>();
+    for (int i = 0; i < size; i++) {
+      stringList.add(readString(buffer));
+    }
+    return stringList;
+  }
+
   /** read a int var from byteBuffer. */
   public static int readInt(ByteBuffer buffer) {
     return buffer.getInt();
+  }
+
+  /** read a long var from byteBuffer. */
+  public static long readLong(ByteBuffer buffer) {
+    return buffer.getLong();
   }
 
   /**
@@ -85,7 +104,25 @@ public class BasicStructureSerDeUtil {
   }
 
   /**
-   * write a int n to byteBuffer.
+   * write string list to dataOutputStream.
+   *
+   * @return the length of string represented by byte[].
+   */
+  public static int write(List<String> stringList, DataOutputStream stream) throws IOException {
+    if (stringList == null) {
+      throw new IllegalArgumentException("stringList must not be null!");
+    }
+    int res = 0;
+    int size = stringList.size();
+    res += write(size, stream);
+    for (String s : stringList) {
+      res += write(s, stream);
+    }
+    return res;
+  }
+
+  /**
+   * write an int n to byteBuffer.
    *
    * @return The number of bytes used to represent n.
    */
@@ -95,7 +132,17 @@ public class BasicStructureSerDeUtil {
   }
 
   /**
-   * write a int n to dataOutputStream.
+   * write a long n to dataOutputStream.
+   *
+   * @return The number of bytes used to represent n.
+   */
+  public static int write(long n, DataOutputStream stream) throws IOException {
+    stream.writeLong(n);
+    return LONG_LEN;
+  }
+
+  /**
+   * write an int n to dataOutputStream.
    *
    * @return The number of bytes used to represent n.
    */

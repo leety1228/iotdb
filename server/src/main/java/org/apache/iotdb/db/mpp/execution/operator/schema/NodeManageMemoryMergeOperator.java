@@ -20,11 +20,13 @@
 package org.apache.iotdb.db.mpp.execution.operator.schema;
 
 import org.apache.iotdb.common.rpc.thrift.TSchemaNode;
-import org.apache.iotdb.db.metadata.mnode.MNodeType;
-import org.apache.iotdb.db.mpp.common.header.HeaderConstant;
+import org.apache.iotdb.commons.schema.node.MNodeType;
+import org.apache.iotdb.db.mpp.common.header.ColumnHeader;
+import org.apache.iotdb.db.mpp.common.header.ColumnHeaderConstant;
 import org.apache.iotdb.db.mpp.execution.operator.Operator;
 import org.apache.iotdb.db.mpp.execution.operator.OperatorContext;
 import org.apache.iotdb.db.mpp.execution.operator.process.ProcessOperator;
+import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.read.common.block.TsBlock;
 import org.apache.iotdb.tsfile.read.common.block.TsBlockBuilder;
 import org.apache.iotdb.tsfile.utils.Binary;
@@ -32,11 +34,13 @@ import org.apache.iotdb.tsfile.utils.Binary;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
+import static org.apache.iotdb.tsfile.read.common.block.TsBlockBuilderStatus.DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES;
 
 public class NodeManageMemoryMergeOperator implements ProcessOperator {
   private final OperatorContext operatorContext;
@@ -44,6 +48,7 @@ public class NodeManageMemoryMergeOperator implements ProcessOperator {
   private final Set<String> nameSet;
   private final Operator child;
   private boolean isReadingMemory;
+  private final List<TSDataType> outputDataTypes;
 
   public NodeManageMemoryMergeOperator(
       OperatorContext operatorContext, Set<TSchemaNode> data, Operator child) {
@@ -52,6 +57,10 @@ public class NodeManageMemoryMergeOperator implements ProcessOperator {
     nameSet = data.stream().map(schemaNode -> schemaNode.getNodeName()).collect(Collectors.toSet());
     this.child = requireNonNull(child, "child operator is null");
     isReadingMemory = true;
+    this.outputDataTypes =
+        ColumnHeaderConstant.showChildPathsColumnHeaders.stream()
+            .map(ColumnHeader::getColumnType)
+            .collect(Collectors.toList());
   }
 
   @Override
@@ -65,12 +74,12 @@ public class NodeManageMemoryMergeOperator implements ProcessOperator {
   }
 
   @Override
-  public TsBlock next() {
+  public TsBlock next() throws Exception {
     if (isReadingMemory) {
       isReadingMemory = false;
       return transferToTsBlock(data);
     } else {
-      TsBlock block = child.next();
+      TsBlock block = child.nextWithTimer();
       if (block == null) {
         return null;
       }
@@ -91,8 +100,7 @@ public class NodeManageMemoryMergeOperator implements ProcessOperator {
   }
 
   private TsBlock transferToTsBlock(Set<TSchemaNode> nodePaths) {
-    TsBlockBuilder tsBlockBuilder =
-        new TsBlockBuilder(HeaderConstant.showChildPathsHeader.getRespDataTypes());
+    TsBlockBuilder tsBlockBuilder = new TsBlockBuilder(outputDataTypes);
     // sort by node type
     Set<TSchemaNode> sortSet =
         new TreeSet<>(
@@ -117,8 +125,8 @@ public class NodeManageMemoryMergeOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean hasNext() {
-    return isReadingMemory || child.hasNext();
+  public boolean hasNext() throws Exception {
+    return isReadingMemory || child.hasNextWithTimer();
   }
 
   @Override
@@ -127,7 +135,24 @@ public class NodeManageMemoryMergeOperator implements ProcessOperator {
   }
 
   @Override
-  public boolean isFinished() {
+  public boolean isFinished() throws Exception {
     return !isReadingMemory && child.isFinished();
+  }
+
+  @Override
+  public long calculateMaxPeekMemory() {
+    // todo calculate the result based on all the scan node; currently, this is shadowed by
+    // schemaQueryMergeNode
+    return Math.max(2L * DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES, child.calculateMaxPeekMemory());
+  }
+
+  @Override
+  public long calculateMaxReturnSize() {
+    return Math.max(DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES, child.calculateMaxReturnSize());
+  }
+
+  @Override
+  public long calculateRetainedSizeAfterCallingNext() {
+    return DEFAULT_MAX_TSBLOCK_SIZE_IN_BYTES + child.calculateRetainedSizeAfterCallingNext();
   }
 }

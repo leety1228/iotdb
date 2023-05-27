@@ -19,9 +19,14 @@
 
 package org.apache.iotdb.db.mpp.execution.exchange;
 
+import org.apache.iotdb.db.conf.IoTDBDescriptor;
+import org.apache.iotdb.db.mpp.common.FragmentInstanceId;
+import org.apache.iotdb.db.mpp.execution.exchange.sink.LocalSinkChannel;
+import org.apache.iotdb.db.mpp.execution.exchange.source.LocalSourceHandle;
 import org.apache.iotdb.db.mpp.execution.memory.LocalMemoryManager;
 import org.apache.iotdb.mpp.rpc.thrift.TFragmentInstanceId;
 import org.apache.iotdb.tsfile.read.common.block.TsBlock;
+import org.apache.iotdb.tsfile.utils.Pair;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
@@ -33,14 +38,22 @@ import javax.annotation.concurrent.NotThreadSafe;
 
 import java.util.LinkedList;
 import java.util.Queue;
+import java.util.concurrent.ExecutorService;
+
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 
 /** This is not thread safe class, the caller should ensure multi-threads safety. */
 @NotThreadSafe
 public class SharedTsBlockQueue {
 
-  private static final Logger logger = LoggerFactory.getLogger(SharedTsBlockQueue.class);
+  private static final Logger LOGGER = LoggerFactory.getLogger(SharedTsBlockQueue.class);
 
   private final TFragmentInstanceId localFragmentInstanceId;
+
+  private final String localPlanNodeId;
+
+  private final String fullFragmentInstanceId;
+
   private final LocalMemoryManager localMemoryManager;
 
   private boolean noMoreTsBlocks = false;
@@ -51,19 +64,39 @@ public class SharedTsBlockQueue {
 
   private SettableFuture<Void> blocked = SettableFuture.create();
 
+  /**
+   * this is completed after calling isBlocked for the first time which indicates this queue needs
+   * to output data
+   */
+  private final SettableFuture<Void> canAddTsBlock = SettableFuture.create();
+
   private ListenableFuture<Void> blockedOnMemory;
 
   private boolean closed = false;
+  private boolean alreadyRegistered = false;
 
   private LocalSourceHandle sourceHandle;
-  private LocalSinkHandle sinkHandle;
+  private LocalSinkChannel sinkChannel;
+
+  private long maxBytesCanReserve =
+      IoTDBDescriptor.getInstance().getConfig().getMaxBytesPerFragmentInstance();
+
+  // used for SharedTsBlockQueue listener
+  private final ExecutorService executorService;
 
   public SharedTsBlockQueue(
-      TFragmentInstanceId fragmentInstanceId, LocalMemoryManager localMemoryManager) {
+      TFragmentInstanceId fragmentInstanceId,
+      String planNodeId,
+      LocalMemoryManager localMemoryManager,
+      ExecutorService executorService) {
     this.localFragmentInstanceId =
         Validate.notNull(fragmentInstanceId, "fragment instance ID cannot be null");
+    this.fullFragmentInstanceId =
+        FragmentInstanceId.createFragmentInstanceIdFromTFragmentInstanceId(localFragmentInstanceId);
+    this.localPlanNodeId = Validate.notNull(planNodeId, "PlanNode ID cannot be null");
     this.localMemoryManager =
         Validate.notNull(localMemoryManager, "local memory manager cannot be null");
+    this.executorService = Validate.notNull(executorService, "ExecutorService can not be null.");
   }
 
   public boolean hasNoMoreTsBlocks() {
@@ -74,7 +107,29 @@ public class SharedTsBlockQueue {
     return bufferRetainedSizeInBytes;
   }
 
+  public SettableFuture<Void> getCanAddTsBlock() {
+    return canAddTsBlock;
+  }
+
+  public void setMaxBytesCanReserve(long maxBytesCanReserve) {
+    this.maxBytesCanReserve = maxBytesCanReserve;
+  }
+
+  public long getMaxBytesCanReserve() {
+    return maxBytesCanReserve;
+  }
+
+  /** Allow adding data to queue manually. */
+  public void allowAddingTsBlock() {
+    if (!canAddTsBlock.isDone()) {
+      canAddTsBlock.set(null);
+    }
+  }
+
   public ListenableFuture<Void> isBlocked() {
+    if (!canAddTsBlock.isDone()) {
+      canAddTsBlock.set(null);
+    }
     return blocked;
   }
 
@@ -82,19 +137,28 @@ public class SharedTsBlockQueue {
     return queue.isEmpty();
   }
 
-  public void setSinkHandle(LocalSinkHandle sinkHandle) {
-    this.sinkHandle = sinkHandle;
+  public boolean isClosed() {
+    return closed;
+  }
+
+  public int getNumOfBufferedTsBlocks() {
+    return queue.size();
+  }
+
+  public void setSinkChannel(LocalSinkChannel sinkChannel) {
+    this.sinkChannel = sinkChannel;
   }
 
   public void setSourceHandle(LocalSourceHandle sourceHandle) {
     this.sourceHandle = sourceHandle;
   }
 
-  /** Notify no more tsblocks will be added to the queue. */
+  /** Notify no more TsBlocks will be added to the queue. */
   public void setNoMoreTsBlocks(boolean noMoreTsBlocks) {
-    logger.info("SharedTsBlockQueue receive no more TsBlocks signal.");
+    LOGGER.debug("[SignalNoMoreTsBlockOnQueue]");
     if (closed) {
-      throw new IllegalStateException("queue has been destroyed");
+      LOGGER.debug("The queue has been destroyed when calling setNoMoreTsBlocks.");
+      return;
     }
     this.noMoreTsBlocks = noMoreTsBlocks;
     if (!blocked.isDone()) {
@@ -106,7 +170,7 @@ public class SharedTsBlockQueue {
   }
 
   /**
-   * Remove a tsblock from the head of the queue and return. Should be invoked only when the future
+   * Remove a TsBlock from the head of the queue and return. Should be invoked only when the future
    * returned by {@link #isBlocked()} completes.
    */
   public TsBlock remove() {
@@ -114,15 +178,19 @@ public class SharedTsBlockQueue {
       throw new IllegalStateException("queue has been destroyed");
     }
     TsBlock tsBlock = queue.remove();
-    // Every time LocalSourceHandle consumes a TsBlock, it needs to send the event to
-    // corresponding LocalSinkHandle.
-    if (sinkHandle != null) {
-      sinkHandle.checkAndInvokeOnFinished();
-    }
     localMemoryManager
         .getQueryPool()
-        .free(localFragmentInstanceId.getQueryId(), tsBlock.getRetainedSizeInBytes());
+        .free(
+            localFragmentInstanceId.getQueryId(),
+            fullFragmentInstanceId,
+            localPlanNodeId,
+            tsBlock.getRetainedSizeInBytes());
     bufferRetainedSizeInBytes -= tsBlock.getRetainedSizeInBytes();
+    // Every time LocalSourceHandle consumes a TsBlock, it needs to send the event to
+    // corresponding LocalSinkChannel.
+    if (sinkChannel != null) {
+      sinkChannel.checkAndInvokeOnFinished();
+    }
     if (blocked.isDone() && queue.isEmpty() && !noMoreTsBlocks) {
       blocked = SettableFuture.create();
     }
@@ -130,25 +198,61 @@ public class SharedTsBlockQueue {
   }
 
   /**
-   * Add tsblocks to the queue. Except the first invocation, this method should be invoked only when
+   * Add TsBlocks to the queue. Except the first invocation, this method should be invoked only when
    * the returned future of last invocation completes.
    */
   public ListenableFuture<Void> add(TsBlock tsBlock) {
     if (closed) {
-      throw new IllegalStateException("queue has been destroyed");
+      // queue may have been closed
+      return immediateVoidFuture();
     }
 
     Validate.notNull(tsBlock, "TsBlock cannot be null");
-    Validate.isTrue(blockedOnMemory == null || blockedOnMemory.isDone(), "queue is full");
-    blockedOnMemory =
+    Validate.isTrue(
+        blockedOnMemory == null || blockedOnMemory.isDone(), "SharedTsBlockQueue is full");
+    if (!alreadyRegistered) {
+      localMemoryManager
+          .getQueryPool()
+          .registerPlanNodeIdToQueryMemoryMap(
+              localFragmentInstanceId.queryId, fullFragmentInstanceId, localPlanNodeId);
+      alreadyRegistered = true;
+    }
+    Pair<ListenableFuture<Void>, Boolean> pair =
         localMemoryManager
             .getQueryPool()
-            .reserve(localFragmentInstanceId.getQueryId(), tsBlock.getRetainedSizeInBytes());
+            .reserve(
+                localFragmentInstanceId.getQueryId(),
+                fullFragmentInstanceId,
+                localPlanNodeId,
+                tsBlock.getRetainedSizeInBytes(),
+                maxBytesCanReserve);
+    blockedOnMemory = pair.left;
     bufferRetainedSizeInBytes += tsBlock.getRetainedSizeInBytes();
-    queue.add(tsBlock);
-    if (!blocked.isDone()) {
-      blocked.set(null);
+
+    // reserve memory failed, we should wait until there is enough memory
+    if (!pair.right) {
+      blockedOnMemory.addListener(
+          () -> {
+            synchronized (this) {
+              queue.add(tsBlock);
+              if (!blocked.isDone()) {
+                blocked.set(null);
+              }
+            }
+          },
+          // Use directExecutor() here could lead to deadlock. Thread A holds lock of
+          // SharedTsBlockQueueA and tries to invoke the listener of
+          // SharedTsBlockQueueB(when freeing memory to complete MemoryReservationFuture) while
+          // Thread B holds lock of SharedTsBlockQueueB and tries to invoke the listener of
+          // SharedTsBlockQueueA
+          executorService);
+    } else { // reserve memory succeeded, add the TsBlock directly
+      queue.add(tsBlock);
+      if (!blocked.isDone()) {
+        blocked.set(null);
+      }
     }
+
     return blockedOnMemory;
   }
 
@@ -168,13 +272,26 @@ public class SharedTsBlockQueue {
     if (bufferRetainedSizeInBytes > 0L) {
       localMemoryManager
           .getQueryPool()
-          .free(localFragmentInstanceId.getQueryId(), bufferRetainedSizeInBytes);
+          .free(
+              localFragmentInstanceId.getQueryId(),
+              fullFragmentInstanceId,
+              localPlanNodeId,
+              bufferRetainedSizeInBytes);
       bufferRetainedSizeInBytes = 0;
+    }
+    if (sinkChannel != null) {
+      // attention: LocalSinkChannel of this SharedTsBlockQueue could be null when we close
+      // LocalSourceHandle(with limit clause it's possible) before constructing the corresponding
+      // LocalSinkChannel.
+      // If this close method is invoked by LocalSourceHandle, listener of LocalSourceHandle will
+      // remove the LocalSourceHandle from the map of MppDataExchangeManager and later when
+      // LocalSinkChannel is initialized, it will construct a new SharedTsBlockQueue.
+      // It is still safe that we let the LocalSourceHandle close successfully in this case. Because
+      // the QueryTerminator will do the final cleaning logic.
+      sinkChannel.close();
     }
   }
 
-  // TODO add Throwable t as a parameter of this method, and then call blocked.setException(t);
-  // instead of blocked.cancel(true);
   /** Destroy the queue and cancel the future. Should only be called in abnormal case */
   public void abort() {
     if (closed) {
@@ -191,7 +308,36 @@ public class SharedTsBlockQueue {
     if (bufferRetainedSizeInBytes > 0L) {
       localMemoryManager
           .getQueryPool()
-          .free(localFragmentInstanceId.getQueryId(), bufferRetainedSizeInBytes);
+          .free(
+              localFragmentInstanceId.getQueryId(),
+              fullFragmentInstanceId,
+              localPlanNodeId,
+              bufferRetainedSizeInBytes);
+      bufferRetainedSizeInBytes = 0;
+    }
+  }
+
+  /** Destroy the queue and cancel the future. Should only be called in abnormal case */
+  public void abort(Throwable t) {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    if (!blocked.isDone()) {
+      blocked.setException(t);
+    }
+    if (blockedOnMemory != null) {
+      bufferRetainedSizeInBytes -= localMemoryManager.getQueryPool().tryCancel(blockedOnMemory);
+    }
+    queue.clear();
+    if (bufferRetainedSizeInBytes > 0L) {
+      localMemoryManager
+          .getQueryPool()
+          .free(
+              localFragmentInstanceId.getQueryId(),
+              fullFragmentInstanceId,
+              localPlanNodeId,
+              bufferRetainedSizeInBytes);
       bufferRetainedSizeInBytes = 0;
     }
   }

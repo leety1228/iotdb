@@ -19,19 +19,22 @@
 
 package org.apache.iotdb.db.mpp.aggregation;
 
+import org.apache.iotdb.db.mpp.metric.QueryExecutionMetricSet;
 import org.apache.iotdb.db.mpp.plan.planner.plan.parameter.AggregationStep;
 import org.apache.iotdb.db.mpp.plan.planner.plan.parameter.InputLocation;
 import org.apache.iotdb.tsfile.file.metadata.enums.TSDataType;
 import org.apache.iotdb.tsfile.file.metadata.statistics.Statistics;
-import org.apache.iotdb.tsfile.read.common.TimeRange;
 import org.apache.iotdb.tsfile.read.common.block.TsBlock;
 import org.apache.iotdb.tsfile.read.common.block.column.Column;
 import org.apache.iotdb.tsfile.read.common.block.column.ColumnBuilder;
+import org.apache.iotdb.tsfile.utils.BitMap;
 
 import java.util.Collections;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.iotdb.db.mpp.metric.QueryExecutionMetricSet.AGGREGATION_FROM_RAW_DATA;
+import static org.apache.iotdb.db.mpp.metric.QueryExecutionMetricSet.AGGREGATION_FROM_STATISTICS;
 
 public class Aggregator {
 
@@ -39,8 +42,8 @@ public class Aggregator {
   // In some intermediate result input, inputLocation[] should include two columns
   protected List<InputLocation[]> inputLocationList;
   protected final AggregationStep step;
-
-  protected TimeRange curTimeRange = new TimeRange(0, Long.MAX_VALUE);
+  protected final QueryExecutionMetricSet QUERY_EXECUTION_METRICS =
+      QueryExecutionMetricSet.getInstance();
 
   // Used for SeriesAggregateScanOperator
   public Aggregator(Accumulator accumulator, AggregationStep step) {
@@ -59,47 +62,52 @@ public class Aggregator {
   }
 
   // Used for SeriesAggregateScanOperator and RawDataAggregateOperator
-  public int processTsBlock(TsBlock tsBlock) {
-    checkArgument(
-        step.isInputRaw(),
-        "Step in SeriesAggregateScanOperator and RawDataAggregateOperator can only process raw input");
-    if (inputLocationList == null) {
-      return accumulator.addInput(tsBlock.getTimeAndValueColumn(0), curTimeRange);
-    } else {
-      int lastReadReadIndex = 0;
+  public void processTsBlock(TsBlock tsBlock, BitMap bitMap, int lastIndex) {
+    long startTime = System.nanoTime();
+    try {
+      checkArgument(
+          step.isInputRaw(),
+          "Step in SeriesAggregateScanOperator and RawDataAggregateOperator can only process raw input");
       for (InputLocation[] inputLocations : inputLocationList) {
         checkArgument(
             inputLocations[0].getTsBlockIndex() == 0,
             "RawDataAggregateOperator can only process one tsBlock input.");
-        Column[] timeValueColumn = new Column[2];
-        timeValueColumn[0] = tsBlock.getTimeColumn();
-        timeValueColumn[1] = tsBlock.getColumn(inputLocations[0].getValueColumnIndex());
-        lastReadReadIndex =
-            Math.max(lastReadReadIndex, accumulator.addInput(timeValueColumn, curTimeRange));
+        Column[] timeAndValueColumn = new Column[2];
+        timeAndValueColumn[0] = tsBlock.getTimeColumn();
+        timeAndValueColumn[1] = tsBlock.getColumn(inputLocations[0].getValueColumnIndex());
+        accumulator.addInput(timeAndValueColumn, bitMap, lastIndex);
       }
-      return lastReadReadIndex;
+    } finally {
+      QUERY_EXECUTION_METRICS.recordExecutionCost(
+          AGGREGATION_FROM_RAW_DATA, System.nanoTime() - startTime);
     }
   }
 
   // Used for AggregateOperator
   public void processTsBlocks(TsBlock[] tsBlock) {
-    checkArgument(!step.isInputRaw(), "Step in AggregateOperator cannot process raw input");
-    if (step.isInputFinal()) {
-      checkArgument(inputLocationList.size() == 1, "Final output can only be single column");
-      Column finalResult =
-          tsBlock[inputLocationList.get(0)[0].getTsBlockIndex()].getColumn(
-              inputLocationList.get(0)[0].getValueColumnIndex());
-      accumulator.setFinal(finalResult);
-    } else {
-      for (InputLocation[] inputLocations : inputLocationList) {
-        Column[] columns = new Column[inputLocations.length];
-        for (int i = 0; i < inputLocations.length; i++) {
-          columns[i] =
-              tsBlock[inputLocations[i].getTsBlockIndex()].getColumn(
-                  inputLocations[i].getValueColumnIndex());
+    long startTime = System.nanoTime();
+    try {
+      checkArgument(!step.isInputRaw(), "Step in AggregateOperator cannot process raw input");
+      if (step.isInputFinal()) {
+        checkArgument(inputLocationList.size() == 1, "Final output can only be single column");
+        Column finalResult =
+            tsBlock[inputLocationList.get(0)[0].getTsBlockIndex()].getColumn(
+                inputLocationList.get(0)[0].getValueColumnIndex());
+        accumulator.setFinal(finalResult);
+      } else {
+        for (InputLocation[] inputLocations : inputLocationList) {
+          Column[] columns = new Column[inputLocations.length];
+          for (int i = 0; i < inputLocations.length; i++) {
+            columns[i] =
+                tsBlock[inputLocations[i].getTsBlockIndex()].getColumn(
+                    inputLocations[i].getValueColumnIndex());
+          }
+          accumulator.addIntermediate(columns);
         }
-        accumulator.addIntermediate(columns);
       }
+    } finally {
+      QUERY_EXECUTION_METRICS.recordExecutionCost(
+          AGGREGATION_FROM_RAW_DATA, System.nanoTime() - startTime);
     }
   }
 
@@ -113,9 +121,15 @@ public class Aggregator {
 
   /** Used for SeriesAggregateScanOperator. */
   public void processStatistics(Statistics[] statistics) {
-    for (InputLocation[] inputLocations : inputLocationList) {
-      int valueIndex = inputLocations[0].getValueColumnIndex();
-      accumulator.addStatistics(statistics[valueIndex]);
+    long startTime = System.nanoTime();
+    try {
+      for (InputLocation[] inputLocations : inputLocationList) {
+        int valueIndex = inputLocations[0].getValueColumnIndex();
+        accumulator.addStatistics(statistics[valueIndex]);
+      }
+    } finally {
+      QUERY_EXECUTION_METRICS.recordExecutionCost(
+          AGGREGATION_FROM_STATISTICS, System.nanoTime() - startTime);
     }
   }
 
@@ -128,20 +142,10 @@ public class Aggregator {
   }
 
   public void reset() {
-    curTimeRange = new TimeRange(0, Long.MAX_VALUE);
     accumulator.reset();
   }
 
   public boolean hasFinalResult() {
     return accumulator.hasFinalResult();
-  }
-
-  public void updateTimeRange(TimeRange curTimeRange) {
-    reset();
-    this.curTimeRange = curTimeRange;
-  }
-
-  public TimeRange getCurTimeRange() {
-    return curTimeRange;
   }
 }

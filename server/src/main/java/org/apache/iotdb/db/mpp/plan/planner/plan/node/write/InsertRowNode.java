@@ -19,23 +19,16 @@
 package org.apache.iotdb.db.mpp.plan.planner.plan.node.write;
 
 import org.apache.iotdb.common.rpc.thrift.TTimePartitionSlot;
-import org.apache.iotdb.commons.conf.IoTDBConstant;
 import org.apache.iotdb.commons.exception.IllegalPathException;
 import org.apache.iotdb.commons.path.PartialPath;
 import org.apache.iotdb.commons.utils.TestOnly;
-import org.apache.iotdb.db.conf.IoTDBDescriptor;
-import org.apache.iotdb.db.engine.StorageEngineV2;
-import org.apache.iotdb.db.exception.metadata.PathNotExistException;
-import org.apache.iotdb.db.exception.query.QueryProcessException;
-import org.apache.iotdb.db.mpp.common.schematree.DeviceSchemaInfo;
-import org.apache.iotdb.db.mpp.common.schematree.ISchemaTree;
 import org.apache.iotdb.db.mpp.plan.analyze.Analysis;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNode;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeId;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanNodeType;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.PlanVisitor;
 import org.apache.iotdb.db.mpp.plan.planner.plan.node.WritePlanNode;
-import org.apache.iotdb.db.utils.CommonUtils;
+import org.apache.iotdb.db.utils.TimePartitionUtils;
 import org.apache.iotdb.db.utils.TypeInferenceUtils;
 import org.apache.iotdb.db.wal.buffer.IWALByteBufferView;
 import org.apache.iotdb.db.wal.buffer.WALEntryValue;
@@ -48,22 +41,16 @@ import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
 import org.apache.iotdb.tsfile.utils.TsPrimitiveType;
 import org.apache.iotdb.tsfile.write.schema.MeasurementSchema;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
 
 public class InsertRowNode extends InsertNode implements WALEntryValue {
-
-  private static final Logger logger = LoggerFactory.getLogger(InsertRowNode.class);
 
   private static final byte TYPE_RAW_STRING = -1;
 
@@ -78,6 +65,7 @@ public class InsertRowNode extends InsertNode implements WALEntryValue {
     super(id);
   }
 
+  @TestOnly
   public InsertRowNode(
       PlanNodeId id,
       PartialPath devicePath,
@@ -93,13 +81,34 @@ public class InsertRowNode extends InsertNode implements WALEntryValue {
     this.isNeedInferType = isNeedInferType;
   }
 
+  public InsertRowNode(
+      PlanNodeId id,
+      PartialPath devicePath,
+      boolean isAligned,
+      String[] measurements,
+      TSDataType[] dataTypes,
+      MeasurementSchema[] measurementSchemas,
+      long time,
+      Object[] values,
+      boolean isNeedInferType) {
+    super(id, devicePath, isAligned, measurements, dataTypes);
+    this.measurementSchemas = measurementSchemas;
+    this.time = time;
+    this.values = values;
+    this.isNeedInferType = isNeedInferType;
+  }
+
   @Override
   public List<WritePlanNode> splitByPartition(Analysis analysis) {
-    TTimePartitionSlot timePartitionSlot = StorageEngineV2.getTimePartitionSlot(time);
+    TTimePartitionSlot timePartitionSlot = TimePartitionUtils.getTimePartition(time);
     this.dataRegionReplicaSet =
         analysis
             .getDataPartitionInfo()
             .getDataRegionReplicaSetForWriting(devicePath.getFullPath(), timePartitionSlot);
+    // collect redirectInfo
+    analysis.setRedirectNodeList(
+        Collections.singletonList(
+            dataRegionReplicaSet.getDataNodeLocations().get(0).getClientRpcEndPoint()));
     return Collections.singletonList(this);
   }
 
@@ -139,6 +148,15 @@ public class InsertRowNode extends InsertNode implements WALEntryValue {
     return dataTypes;
   }
 
+  @Override
+  public TSDataType getDataType(int index) {
+    if (isNeedInferType) {
+      return TypeInferenceUtils.getPredictedDataType(values[index], true);
+    } else {
+      return dataTypes[index];
+    }
+  }
+
   public Object[] getValues() {
     return values;
   }
@@ -165,92 +183,14 @@ public class InsertRowNode extends InsertNode implements WALEntryValue {
 
   @TestOnly
   public List<TTimePartitionSlot> getTimePartitionSlots() {
-    return Collections.singletonList(StorageEngineV2.getTimePartitionSlot(time));
+    return Collections.singletonList(TimePartitionUtils.getTimePartition(time));
   }
 
   @Override
-  public boolean validateAndSetSchema(ISchemaTree schemaTree) {
-    DeviceSchemaInfo deviceSchemaInfo =
-        schemaTree.searchDeviceSchemaInfo(devicePath, Arrays.asList(measurements));
-    if (deviceSchemaInfo.isAligned() != isAligned) {
-      return false;
-    }
-    this.measurementSchemas =
-        deviceSchemaInfo.getMeasurementSchemaList().toArray(new MeasurementSchema[0]);
-
-    // transfer data types from string values when necessary
-    try {
-      transferType();
-    } catch (QueryProcessException e) {
-      return false;
-    }
-
-    // validate whether data types are matched
-    return selfCheckDataTypes();
-  }
-
-  /**
-   * transfer String[] values to specific data types when isNeedInferType is true. <br>
-   * Notice: measurementSchemas must be initialized before calling this method
-   */
-  @SuppressWarnings("squid:S3776") // Suppress high Cognitive Complexity warning
-  private void transferType() throws QueryProcessException {
-    if (!isNeedInferType) {
-      return;
-    }
-
-    for (int i = 0; i < measurementSchemas.length; i++) {
-      // null when time series doesn't exist
-      if (measurementSchemas[i] == null) {
-        if (!IoTDBDescriptor.getInstance().getConfig().isEnablePartialInsert()) {
-          throw new QueryProcessException(
-              new PathNotExistException(
-                  devicePath.getFullPath() + IoTDBConstant.PATH_SEPARATOR + measurements[i]));
-        } else {
-          markFailedMeasurement(
-              i,
-              new QueryProcessException(
-                  new PathNotExistException(
-                      devicePath.getFullPath() + IoTDBConstant.PATH_SEPARATOR + measurements[i])));
-        }
-        continue;
-      }
-      // parse string value to specific type
-      dataTypes[i] = measurementSchemas[i].getType();
-      try {
-        values[i] = CommonUtils.parseValue(dataTypes[i], values[i].toString());
-      } catch (Exception e) {
-        logger.warn(
-            "data type of {}.{} is not consistent, registered type {}, inserting timestamp {}, value {}",
-            devicePath,
-            measurements[i],
-            dataTypes[i],
-            time,
-            values[i]);
-        if (!IoTDBDescriptor.getInstance().getConfig().isEnablePartialInsert()) {
-          throw e;
-        } else {
-          markFailedMeasurement(i, e);
-        }
-      }
-    }
-    isNeedInferType = false;
-  }
-
-  @Override
-  public void markFailedMeasurement(int index, Exception cause) {
+  public void markFailedMeasurement(int index) {
     if (measurements[index] == null) {
       return;
     }
-
-    if (failedMeasurementIndex2Info == null) {
-      failedMeasurementIndex2Info = new HashMap<>();
-    }
-
-    FailedMeasurementInfo failedMeasurementInfo =
-        new FailedMeasurementInfo(measurements[index], dataTypes[index], values[index], cause);
-    failedMeasurementIndex2Info.putIfAbsent(index, failedMeasurementInfo);
-
     measurements[index] = null;
     dataTypes[index] = null;
     values[index] = null;
@@ -506,11 +446,6 @@ public class InsertRowNode extends InsertNode implements WALEntryValue {
     return getTime();
   }
 
-  @Override
-  public Object getFirstValueOfIndex(int index) {
-    return values[index];
-  }
-
   // region serialize & deserialize methods for WAL
   /** Serialized size for wal */
   @Override
@@ -588,7 +523,7 @@ public class InsertRowNode extends InsertNode implements WALEntryValue {
 
   /** Serialize measurements and values, ignoring failed time series */
   private void serializeMeasurementsAndValues(IWALByteBufferView buffer) {
-    buffer.putInt(measurementSchemas.length - getFailedMeasurementNumber());
+    buffer.putInt(measurements.length - getFailedMeasurementNumber());
     serializeMeasurementSchemasToWAL(buffer);
     putDataTypesAndValues(buffer);
     buffer.put((byte) (isAligned ? 1 : 0));
@@ -653,9 +588,9 @@ public class InsertRowNode extends InsertNode implements WALEntryValue {
 
     measurements = new String[measurementSize];
     measurementSchemas = new MeasurementSchema[measurementSize];
+    dataTypes = new TSDataType[measurementSize];
     deserializeMeasurementSchemas(stream);
 
-    dataTypes = new TSDataType[measurementSize];
     values = new Object[measurementSize];
     fillDataTypesAndValuesFromWAL(stream);
 

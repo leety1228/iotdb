@@ -21,7 +21,9 @@ package org.apache.iotdb.commons.auth.role;
 import org.apache.iotdb.commons.auth.AuthException;
 import org.apache.iotdb.commons.auth.entity.Role;
 import org.apache.iotdb.commons.concurrent.HashLock;
+import org.apache.iotdb.commons.path.PartialPath;
 import org.apache.iotdb.commons.utils.AuthUtils;
+import org.apache.iotdb.rpc.TSStatusCode;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -59,7 +61,7 @@ public abstract class BasicRoleManager implements IRoleManager {
         }
       }
     } catch (IOException e) {
-      throw new AuthException(e);
+      throw new AuthException(TSStatusCode.AUTH_IO_EXCEPTION, e);
     } finally {
       lock.readUnlock(rolename);
     }
@@ -81,7 +83,7 @@ public abstract class BasicRoleManager implements IRoleManager {
       roleMap.put(rolename, role);
       return true;
     } catch (IOException e) {
-      throw new AuthException(e);
+      throw new AuthException(TSStatusCode.AUTH_IO_EXCEPTION, e);
     } finally {
       lock.writeUnlock(rolename);
     }
@@ -98,21 +100,22 @@ public abstract class BasicRoleManager implements IRoleManager {
         return false;
       }
     } catch (IOException e) {
-      throw new AuthException(e);
+      throw new AuthException(TSStatusCode.AUTH_IO_EXCEPTION, e);
     } finally {
       lock.writeUnlock(rolename);
     }
   }
 
   @Override
-  public boolean grantPrivilegeToRole(String rolename, String path, int privilegeId)
+  public boolean grantPrivilegeToRole(String rolename, PartialPath path, int privilegeId)
       throws AuthException {
     AuthUtils.validatePrivilegeOnPath(path, privilegeId);
     lock.writeLock(rolename);
     try {
       Role role = getRole(rolename);
       if (role == null) {
-        throw new AuthException(String.format("No such role %s", rolename));
+        throw new AuthException(
+            TSStatusCode.ROLE_NOT_EXIST, String.format("No such role %s", rolename));
       }
       if (role.hasPrivilege(path, privilegeId)) {
         return false;
@@ -123,7 +126,7 @@ public abstract class BasicRoleManager implements IRoleManager {
         accessor.saveRole(role);
       } catch (IOException e) {
         role.setPrivileges(path, privilegesCopy);
-        throw new AuthException(e);
+        throw new AuthException(TSStatusCode.AUTH_IO_EXCEPTION, e);
       }
       return true;
     } finally {
@@ -132,14 +135,15 @@ public abstract class BasicRoleManager implements IRoleManager {
   }
 
   @Override
-  public boolean revokePrivilegeFromRole(String rolename, String path, int privilegeId)
+  public boolean revokePrivilegeFromRole(String rolename, PartialPath path, int privilegeId)
       throws AuthException {
     AuthUtils.validatePrivilegeOnPath(path, privilegeId);
     lock.writeLock(rolename);
     try {
       Role role = getRole(rolename);
       if (role == null) {
-        throw new AuthException(String.format("No such role %s", rolename));
+        throw new AuthException(
+            TSStatusCode.ROLE_NOT_EXIST, String.format("No such role %s", rolename));
       }
       if (!role.hasPrivilege(path, privilegeId)) {
         return false;
@@ -149,7 +153,7 @@ public abstract class BasicRoleManager implements IRoleManager {
         accessor.saveRole(role);
       } catch (IOException e) {
         role.addPrivilege(path, privilegeId);
-        throw new AuthException(e);
+        throw new AuthException(TSStatusCode.AUTH_IO_EXCEPTION, e);
       }
       return true;
     } finally {
@@ -181,7 +185,7 @@ public abstract class BasicRoleManager implements IRoleManager {
         try {
           accessor.saveRole(role);
         } catch (IOException e) {
-          throw new AuthException(e);
+          throw new AuthException(TSStatusCode.AUTH_IO_EXCEPTION, e);
         }
       }
     }

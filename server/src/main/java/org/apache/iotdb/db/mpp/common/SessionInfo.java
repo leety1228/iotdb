@@ -18,15 +18,31 @@
  */
 package org.apache.iotdb.db.mpp.common;
 
+import org.apache.iotdb.commons.conf.IoTDBConstant.ClientVersion;
+import org.apache.iotdb.tsfile.utils.ReadWriteIOUtils;
+
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+
 public class SessionInfo {
   private final long sessionId;
   private final String userName;
   private final String zoneId;
 
+  private ClientVersion version = ClientVersion.V_1_0;
+
   public SessionInfo(long sessionId, String userName, String zoneId) {
     this.sessionId = sessionId;
     this.userName = userName;
     this.zoneId = zoneId;
+  }
+
+  public SessionInfo(long sessionId, String userName, String zoneId, ClientVersion version) {
+    this.sessionId = sessionId;
+    this.userName = userName;
+    this.zoneId = zoneId;
+    this.version = version;
   }
 
   public long getSessionId() {
@@ -39,5 +55,22 @@ public class SessionInfo {
 
   public String getZoneId() {
     return zoneId;
+  }
+
+  public ClientVersion getVersion() {
+    return version;
+  }
+
+  public static SessionInfo deserializeFrom(ByteBuffer buffer) {
+    long sessionId = ReadWriteIOUtils.readLong(buffer);
+    String userName = ReadWriteIOUtils.readString(buffer);
+    String zoneId = ReadWriteIOUtils.readString(buffer);
+    return new SessionInfo(sessionId, userName, zoneId);
+  }
+
+  public void serialize(DataOutputStream stream) throws IOException {
+    ReadWriteIOUtils.write(sessionId, stream);
+    ReadWriteIOUtils.write(userName, stream);
+    ReadWriteIOUtils.write(zoneId, stream);
   }
 }

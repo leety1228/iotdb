@@ -18,26 +18,18 @@
  */
 package org.apache.iotdb.db.mpp.execution.driver;
 
-import org.apache.iotdb.commons.path.PartialPath;
 import org.apache.iotdb.db.engine.querycontext.QueryDataSource;
-import org.apache.iotdb.db.engine.storagegroup.DataRegion;
-import org.apache.iotdb.db.engine.storagegroup.TsFileResource;
 import org.apache.iotdb.db.exception.query.QueryProcessException;
-import org.apache.iotdb.db.metadata.idtable.IDTable;
-import org.apache.iotdb.db.mpp.execution.exchange.ISinkHandle;
 import org.apache.iotdb.db.mpp.execution.operator.Operator;
 import org.apache.iotdb.db.mpp.execution.operator.source.DataSourceOperator;
-import org.apache.iotdb.db.query.control.FileReaderManager;
 
 import com.google.common.util.concurrent.SettableFuture;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
-import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
+
+import static org.apache.iotdb.db.mpp.metric.QueryExecutionMetricSet.QUERY_RESOURCE_INIT;
 
 /**
  * One dataDriver is responsible for one FragmentInstance which is for data query, which may
@@ -48,15 +40,12 @@ public class DataDriver extends Driver {
 
   private boolean init;
 
-  /** closed tsfile used in this fragment instance */
-  private Set<TsFileResource> closedFilePaths;
-  /** unClosed tsfile used in this fragment instance */
-  private Set<TsFileResource> unClosedFilePaths;
+  // Unit : Byte
+  private final long estimatedMemorySize;
 
-  public DataDriver(Operator root, ISinkHandle sinkHandle, DataDriverContext driverContext) {
-    super(root, sinkHandle, driverContext);
-    this.closedFilePaths = new HashSet<>();
-    this.unClosedFilePaths = new HashSet<>();
+  public DataDriver(Operator root, DriverContext driverContext, long estimatedMemorySize) {
+    super(root, driverContext);
+    this.estimatedMemorySize = estimatedMemorySize;
   }
 
   @Override
@@ -66,7 +55,7 @@ public class DataDriver extends Driver {
         initialize();
       } catch (Throwable t) {
         LOGGER.error(
-            "Failed to do the initialization for fragment instance {} ", driverContext.getId(), t);
+            "Failed to do the initialization for driver {} ", driverContext.getDriverTaskID(), t);
         driverContext.failed(t);
         blockedFuture.setException(t);
         return false;
@@ -76,43 +65,44 @@ public class DataDriver extends Driver {
   }
 
   /**
-   * All file paths used by this fragment instance must be cleared and thus the usage reference must
-   * be decreased.
-   */
-  @Override
-  protected void releaseResource() {
-    for (TsFileResource tsFile : closedFilePaths) {
-      FileReaderManager.getInstance().decreaseFileReaderReference(tsFile, true);
-    }
-    closedFilePaths = null;
-    for (TsFileResource tsFile : unClosedFilePaths) {
-      FileReaderManager.getInstance().decreaseFileReaderReference(tsFile, true);
-    }
-    unClosedFilePaths = null;
-  }
-
-  /**
    * init seq file list and unseq file list in QueryDataSource and set it into each SourceNode TODO
    * we should change all the blocked lock operation into tryLock
    */
   private void initialize() throws QueryProcessException {
-    List<DataSourceOperator> sourceOperators =
-        ((DataDriverContext) driverContext).getSourceOperators();
-    if (sourceOperators != null && !sourceOperators.isEmpty()) {
-      QueryDataSource dataSource = initQueryDataSource();
-      sourceOperators.forEach(
-          sourceOperator -> {
-            // construct QueryDataSource for source operator
-            QueryDataSource queryDataSource =
-                new QueryDataSource(dataSource.getSeqResources(), dataSource.getUnseqResources());
+    long startTime = System.nanoTime();
+    try {
+      List<DataSourceOperator> sourceOperators =
+          ((DataDriverContext) driverContext).getSourceOperators();
+      if (sourceOperators != null && !sourceOperators.isEmpty()) {
+        QueryDataSource dataSource = initQueryDataSource();
+        if (dataSource == null) {
+          // if this driver is being initialized, meanwhile the whole FI was aborted or cancelled
+          // for some reasons, we may get null QueryDataSource here.
+          // And it's safe for us to throw this exception here in such case.
+          throw new IllegalStateException("QueryDataSource should never be null!");
+        }
+        sourceOperators.forEach(
+            sourceOperator -> {
+              // construct QueryDataSource for source operator
+              QueryDataSource queryDataSource =
+                  new QueryDataSource(dataSource.getSeqResources(), dataSource.getUnseqResources());
 
-            queryDataSource.setDataTTL(dataSource.getDataTTL());
+              queryDataSource.setDataTTL(dataSource.getDataTTL());
 
-            sourceOperator.initQueryDataSource(queryDataSource);
-          });
+              sourceOperator.initQueryDataSource(queryDataSource);
+            });
+      }
+
+      this.init = true;
+    } finally {
+      QUERY_EXECUTION_METRICS.recordExecutionCost(
+          QUERY_RESOURCE_INIT, System.nanoTime() - startTime);
     }
+  }
 
-    this.init = true;
+  @Override
+  protected void releaseResource() {
+    // do nothing
   }
 
   /**
@@ -120,74 +110,11 @@ public class DataDriver extends Driver {
    * QueryDataSource needed for this query
    */
   private QueryDataSource initQueryDataSource() throws QueryProcessException {
-    DataDriverContext context = (DataDriverContext) driverContext;
-    DataRegion dataRegion = context.getDataRegion();
-    dataRegion.readLock();
-    try {
-      List<PartialPath> pathList =
-          context.getPaths().stream().map(IDTable::translateQueryPath).collect(Collectors.toList());
-      // when all the selected series are under the same device, the QueryDataSource will be
-      // filtered according to timeIndex
-      Set<String> selectedDeviceIdSet =
-          pathList.stream().map(PartialPath::getDevice).collect(Collectors.toSet());
-
-      QueryDataSource dataSource =
-          dataRegion.query(
-              pathList,
-              selectedDeviceIdSet.size() == 1 ? selectedDeviceIdSet.iterator().next() : null,
-              driverContext.getFragmentInstanceContext(),
-              context.getTimeFilter());
-
-      // used files should be added before mergeLock is unlocked, or they may be deleted by
-      // running merge
-      addUsedFilesForQuery(dataSource);
-
-      return dataSource;
-    } finally {
-      dataRegion.readUnlock();
-    }
+    return ((DataDriverContext) driverContext).getSharedQueryDataSource();
   }
 
-  /** Add the unique file paths to closeddFilePathsMap and unClosedFilePathsMap. */
-  private void addUsedFilesForQuery(QueryDataSource dataSource) {
-
-    // sequence data
-    addUsedFilesForQuery(dataSource.getSeqResources());
-
-    // unsequence data
-    addUsedFilesForQuery(dataSource.getUnseqResources());
-  }
-
-  private void addUsedFilesForQuery(List<TsFileResource> resources) {
-    Iterator<TsFileResource> iterator = resources.iterator();
-    while (iterator.hasNext()) {
-      TsFileResource tsFileResource = iterator.next();
-      boolean isClosed = tsFileResource.isClosed();
-      addFilePathToMap(tsFileResource, isClosed);
-
-      // this file may be deleted just before we lock it
-      if (tsFileResource.isDeleted()) {
-        Set<TsFileResource> pathSet = isClosed ? closedFilePaths : unClosedFilePaths;
-        // This resource may be removed by other threads of this query.
-        if (pathSet.remove(tsFileResource)) {
-          FileReaderManager.getInstance().decreaseFileReaderReference(tsFileResource, isClosed);
-        }
-        iterator.remove();
-      }
-    }
-  }
-
-  /**
-   * Increase the usage reference of filePath of job id. Before the invoking of this method, <code>
-   * this.setqueryIdForCurrentRequestThread</code> has been invoked, so <code>
-   * sealedFilePathsMap.get(queryId)</code> or <code>unsealedFilePathsMap.get(queryId)</code> must
-   * not return null.
-   */
-  private void addFilePathToMap(TsFileResource tsFile, boolean isClosed) {
-    Set<TsFileResource> pathSet = isClosed ? closedFilePaths : unClosedFilePaths;
-    if (!pathSet.contains(tsFile)) {
-      pathSet.add(tsFile);
-      FileReaderManager.getInstance().increaseFileReaderReference(tsFile, isClosed);
-    }
+  @Override
+  public long getEstimatedMemorySize() {
+    return estimatedMemorySize;
   }
 }
